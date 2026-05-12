@@ -1,0 +1,511 @@
+import asyncio
+import logging
+import re
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from functools import lru_cache
+from typing import List
+import os
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+from backend.repository.mapping_repo import MappingRepository
+from backend.core.converter import DataTypeConverter
+from backend.parser.sql_parser import parse_sql, validate_fk
+from backend.config.logger import logger
+from backend.config.db import init_db_pool, close_db_pool
+from backend.core.cache_store import result_cache
+from backend.exporter.excel_exporter import export_confluent_xlsx, export_table_xlsx, export_all_csv, export_table_csv
+
+# Logging is configured once in backend.config.logger (imported below).
+# Do not call basicConfig here to avoid duplicate handlers.
+
+# ── Constants ────────────────────────────────────────────
+MAX_FILE_SIZE_MB = 10
+MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
+MAX_FILES = 20
+SESSION_TTL = timedelta(hours=1)
+
+# ── Mapping cache (source_db, dest_db) → (mapping_dict, loaded_at) ──────
+_mapping_cache: dict[tuple, tuple] = {}
+_MAPPING_TTL = timedelta(minutes=5)
+
+converter: DataTypeConverter = DataTypeConverter({})
+
+# ── Background session cleanup ────────────────────────────────────────────
+async def _session_cleanup_loop() -> None:
+    """Background task: purge expired sessions every 5 minutes."""
+    while True:
+        await asyncio.sleep(300)
+        now = datetime.now()
+        expired = [sid for sid, s in list(result_cache.items())
+                   if now - s["created_at"] > SESSION_TTL]
+        for sid in expired:
+            result_cache.pop(sid, None)
+        if expired:
+            logger.info(f"🧹 Background cleanup: removed {len(expired)} expired session(s)")
+
+limiter = Limiter(key_func=get_remote_address)
+
+# ── Lifecycle ─────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀 [1/2] Initialization: Starting FastAPI application...")
+    
+    try:
+        # ระบุว่ากำลังทำอะไร
+        logger.info("📡 Connecting to PostgreSQL database pool...")
+        init_db_pool()
+        
+        # อธิบายเหตุผล (Rationale) ของการเปลี่ยนแปลง (Bug Fix)
+        logger.info(
+            "✅ Database pool initialized. "
+            "Note: Mapping loading deferred to request-time to optimize startup speed (Bug #3 fix)."
+        )
+        
+    except Exception as e:
+        # ใส่ Error Category หรือจุดที่เกิดปัญหาให้ชัด
+        logger.error(f"❌ Critical Failure: Application failed to boot during Database Setup. Error: {e}", exc_info=True)
+        raise
+        
+    logger.info("🚀 [2/2] Startup Complete: Server is ready to accept connections.")
+
+    _cleanup_task = asyncio.create_task(_session_cleanup_loop())
+    logger.info("🕐 Background session cleanup task started (interval: 5 min)")
+
+    yield
+    
+    # ส่วนของ Shutdown
+    logger.info("🛑 Termination: Gracefully shutting down application...")
+    _cleanup_task.cancel()
+    try:
+        await _cleanup_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        close_db_pool()
+        logger.info("🔌 Database connections closed successfully.")
+    except Exception as e:
+        logger.error(f"⚠️ Shutdown Warning: Error while closing resources: {e}")
+    
+    logger.info("👋 Shutdown sequence finished.")
+
+app = FastAPI(lifespan=lifespan)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ── CORS ─────────────────────────────────────────────────
+_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS",
+    "http://localhost:5500,http://127.0.0.1:5500,http://localhost:8000,http://127.0.0.1:8000,null"
+).split(",")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_ORIGINS,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=True,          
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type"],
+)
+
+# ── Models ────────────────────────────────────────────────
+class OverrideRequest(BaseModel):
+    table: str
+    column: str
+    new_type: str
+
+    @field_validator("table", "column", "new_type")
+    @classmethod
+    def no_empty(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Field must not be empty")
+        if len(v) > 256:
+            raise ValueError("Field too long")
+        return v
+
+# ── Helpers ───────────────────────────────────────────────
+def cleanup_expired_sessions() -> None:
+    """Manual purge — kept for ad-hoc use; normal cleanup runs in background."""
+    now = datetime.now()
+    expired = [sid for sid, s in list(result_cache.items())
+               if now - s["created_at"] > SESSION_TTL]
+    for sid in expired:
+        result_cache.pop(sid, None)
+    if expired:
+        logger.info(f"🧹 Cleaned {len(expired)} expired session(s)")
+
+def get_cached_data(session_id: str) -> dict:
+    try:
+        uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid session ID format")
+    data = result_cache.get(session_id)
+    if not data:
+        raise HTTPException(404, "Session expired or not found")
+    return data
+
+
+def _prune_column_diagnostics(data: dict, table_name: str, column_name: str) -> None:
+    unknown_map = data.get("unknown", {})
+    unknown_map[table_name] = [
+        item for item in unknown_map.get(table_name, [])
+        if item.get("column_name") != column_name
+    ]
+    if not unknown_map.get(table_name):
+        unknown_map.pop(table_name, None)
+
+    anomaly_map = data.get("byte_anomalies", {})
+    anomaly_map[table_name] = [
+        item for item in anomaly_map.get(table_name, [])
+        if item.get("column_name") != column_name
+    ]
+    if not anomaly_map.get(table_name):
+        anomaly_map.pop(table_name, None)
+
+    data["fk_errors"] = validate_fk(data.get("tables", {}))
+
+def _make_export_filename(table_names: list[str], ext: str) -> str:
+    """สร้างชื่อไฟล์จากชื่อ table ทั้งหมด + _confluent"""
+    clean = [re.sub(r"[^\w]", "_", t) for t in table_names]
+    joined = "_".join(clean)
+    # ตัดให้ไม่เกิน 200 chars ก่อน suffix
+    if len(joined) > 200:
+        joined = joined[:200]
+    return f"{joined}_confluent.{ext}"
+
+
+def _load_mapping(source_db: str | None, dest_db: str | None) -> dict:
+    """
+    โหลด mapping ตาม db pair พร้อม in-process TTL cache (5 นาที)
+    - Bug 3 Fix: โหลดจาก DB เสมอตาม source_db ที่ระบุ เพื่อป้องกันข้อมูลปนกัน
+    """
+    cache_key = (source_db, dest_db)
+    cached = _mapping_cache.get(cache_key)
+    if cached:
+        mapping, loaded_at = cached
+        if datetime.now() - loaded_at < _MAPPING_TTL:
+            logger.debug(f"📦 Mapping cache hit: {source_db} → {dest_db}")
+            return mapping
+
+    repo = MappingRepository()
+
+    # 1. ถ้ามีทั้งคู่ -> ดึง per-pair mapping
+    if source_db and dest_db:
+        try:
+            pair_mapping = repo.get_by_db_pair(source_db, dest_db)
+            if pair_mapping:
+                logger.info(f"📦 Pair mapping loaded: {source_db} → {dest_db} ({len(pair_mapping)} types)")
+                _mapping_cache[cache_key] = (pair_mapping, datetime.now())
+                return pair_mapping
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load pair mapping ({source_db}→{dest_db}): {e}")
+
+    # 2. ถ้ามีแค่ source_db หรือโหลด pair ไม่สำเร็จ -> ดึง mapping ของ source_db นั้นๆ
+    if source_db:
+        try:
+            source_mapping = repo.get_all(source_db=source_db)
+            logger.info(f"📦 Source mapping loaded for {source_db} ({len(source_mapping)} types)")
+            _mapping_cache[cache_key] = (source_mapping, datetime.now())
+            return source_mapping
+        except Exception as e:
+            logger.error(f"❌ Failed to load source mapping for {source_db}: {e}")
+
+    # 3. Fallback สุดท้าย (ไม่แนะนำ) -> ดึงทั้งหมดแบบระบุไม่ได้ (อาจปนกัน)
+    logger.warning("⚠️ No source_db specified, loading all mappings (potential mix-up)")
+    fallback = repo.get_all()
+    _mapping_cache[cache_key] = (fallback, datetime.now())
+    return fallback
+
+# ── API ───────────────────────────────────────────────────
+@app.get("/health")
+def health():
+    from backend.config.db import get_connection, release_connection, get_db_names
+    db_status: dict[str, str] = {}
+    for db_name in get_db_names():
+        conn = None
+        try:
+            conn = get_connection(db_name)
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            db_status[db_name] = "ok"
+        except Exception as e:
+            db_status[db_name] = f"error: {e}"
+        finally:
+            if conn is not None:
+                try:
+                    release_connection(conn, db_name)
+                except Exception:
+                    pass
+    overall = "ok" if all(v == "ok" for v in db_status.values()) else "degraded"
+    return {"status": overall, "sessions": len(result_cache), "db": db_status}
+
+@app.get("/db-pairs")
+def get_db_pairs():
+    """
+    คืนรายการ source_db / dest_db ที่มี mapping ใน DB
+    Frontend ใช้เพื่อ populate dropdown แบบ dynamic
+    """
+    try:
+        repo = MappingRepository()
+        pairs = repo.get_available_db_pairs()
+        return {"pairs": pairs}
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch db pairs: {e}")
+        raise HTTPException(500, "Failed to fetch DB pairs")
+
+@app.post("/convert")
+@limiter.limit("30/minute")
+async def convert(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    source_db: str | None = Form(default=None),
+    dest_db: str | None = Form(default=None),
+):
+    if len(files) > MAX_FILES:
+        raise HTTPException(400, f"Too many files (max {MAX_FILES})")
+
+    # Bug 3 Fix: โหลด mapping สดๆ ใน request นี้เลย
+    active_mapping = _load_mapping(source_db, dest_db)
+    
+    logger.info(
+        f"📥 Convert {len(files)} file(s) "
+        f"[{source_db or 'default'} → {dest_db or 'default'}]"
+    )
+
+    tables: dict = {}
+    unknown: dict = {}
+    table_source: dict = {}
+    duplicate_tables: dict = {}
+    byte_anomalies: dict = {}
+
+    for file in files:
+        filename = file.filename
+        try:
+            raw = await file.read()
+            if len(raw) > MAX_FILE_SIZE:
+                raise HTTPException(400, f"{filename}: exceeds {MAX_FILE_SIZE_MB} MB limit")
+            sql_text = raw.decode("utf-8-sig")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"❌ Error reading {filename}: {e}")
+            raise HTTPException(400, f"Cannot read file: {filename}")
+
+        parsed = parse_sql(sql_text)
+        if not parsed:
+            logger.warning(f"  ⚠️ No table found in: {filename}")
+            continue
+
+        parsed_by_table: dict = {}
+        for row in parsed:
+            parsed_by_table.setdefault(row["table"], []).append(row)
+
+        for table, table_rows in parsed_by_table.items():
+            is_duplicate = False
+            if table in table_source:
+                dup = duplicate_tables.setdefault(table, {
+                    "first_file":      table_source[table],
+                    "duplicate_files": [],
+                })
+                if filename not in dup["duplicate_files"]:
+                    dup["duplicate_files"].append(filename)
+                    logger.warning(
+                        f"⚠️  Duplicate table '{table}' in '{filename}' "
+                        f"(first defined in '{table_source[table]}')"
+                    )
+                is_duplicate = True
+                table_key = f"{table}__{filename}"
+            else:
+                table_source[table] = filename
+                table_key = table
+
+            for row in table_rows:
+                # ใช้ active_mapping ที่โหลดมาสดๆ ในการ convert
+                res = converter.convert(row["type"], override_mapping=active_mapping)
+                
+                col_entry = {
+                    "column_name":     row["column"],
+                    "file":            filename,
+                    "raw_type":        res.get("raw"),
+                    "logical_type":    res.get("logical"),
+                    "standard_type":   res.get("standard_type"),
+                    "final_type":      res.get("final") if res.get("status") == "ok" else row["type"],
+                    "source_sql_type": row["type"],
+                    "nullable":        "NOT NULL" if row.get("nullable") == "NOT NULL" else "NULL",
+                    "is_pk":           row.get("is_pk", False),
+                    "fk":              row.get("fk"),
+                    "is_duplicate":    is_duplicate,
+                }
+                tables.setdefault(table_key, []).append(col_entry)
+
+                if res.get("status") != "ok":
+                    unknown.setdefault(table_key, []).append({
+                        "column_name": row["column"],
+                        "type":        row["type"],
+                        "file":        filename,
+                    })
+                
+                # ตรวจสอบ byte anomalies (เช่น binary types)
+                if res.get("byte_anomaly"):
+                    byte_anomalies.setdefault(table_key, []).append({
+                        "column_name": row["column"],
+                        "source_type": row["type"],
+                        "raw_type": res.get("raw"),
+                        "logical_type": res.get("logical"),
+                        "detail": res.get("byte_anomaly_detail"),
+                        "file": filename,
+                    })
+
+    # Validate foreign keys
+    fk_errors = validate_fk(tables)
+
+    session_id = str(uuid.uuid4())
+    result_cache[session_id] = {
+        "tables":           tables,
+        "unknown":          unknown,
+        "fk_errors":        fk_errors,
+        "byte_anomalies":   byte_anomalies,
+        "duplicate_tables": duplicate_tables,
+        "source_db":        source_db,
+        "dest_db":          dest_db,
+        "created_at":       datetime.now(),
+    }
+
+    logger.info(f"✅ Session {session_id} created — {len(tables)} table(s)")
+    
+    return {
+        "session_id":       session_id,
+        "file_count":       len(files),
+        "source_db":        source_db,
+        "dest_db":          dest_db,
+        "tables":           tables,
+        "unknown":          unknown,
+        "fk_errors":        fk_errors,
+        "byte_anomalies":   byte_anomalies,
+        "duplicate_tables": duplicate_tables,
+    }
+
+@app.get("/result/{session_id}")
+def get_result(session_id: str):
+    return get_cached_data(session_id)
+
+@app.post("/override/{session_id}")
+def override(session_id: str, body: OverrideRequest):
+    data = get_cached_data(session_id)
+    table_cols = data["tables"].get(body.table)
+    if table_cols is None:
+        raise HTTPException(404, f"Table '{body.table}' not found")
+    
+    for col in table_cols:
+        if col["column_name"] == body.column:
+            col["final_type"] = body.new_type
+            _prune_column_diagnostics(data, body.table, body.column)
+            logger.info(f"✏️  Override {body.table}.{body.column} → {body.new_type}")
+            return {"updated_column": col}
+            
+    raise HTTPException(404, f"Column '{body.column}' not found in table '{body.table}'")
+
+@app.delete("/session/{session_id}")
+def delete_session(session_id: str):
+    # UUID validation centralised in get_cached_data; replicate here since
+    # delete does not go through that helper.
+    try:
+        uuid.UUID(session_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid session ID format")
+    if session_id in result_cache:
+        del result_cache[session_id]
+        logger.info(f"🗑  Session {session_id} deleted")
+        return {"status": "deleted"}
+    raise HTTPException(404, "Session not found")
+
+# ── Export endpoints ──────────────────────────────────────
+@app.get("/export/{session_id}/xlsx")
+def export_all(session_id: str, tables: List[str] = Query(default=None)):
+    data = get_cached_data(session_id)
+    all_tables = data["tables"]
+    selected = {k: v for k, v in all_tables.items() if tables is None or k in tables}
+    byte_anomalies = {k: v for k, v in data.get("byte_anomalies", {}).items() if k in selected}
+    
+    file_names = sorted({col["file"] for cols in selected.values() for col in cols if col.get("file")})
+    file_name = ", ".join(file_names) if file_names else None
+
+    buf = export_confluent_xlsx(
+        selected,
+        byte_anomalies=byte_anomalies,
+        source_db=data.get("source_db"),
+        dest_db=data.get("dest_db"),
+        file_name=file_name,
+    )
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={_make_export_filename(list(selected.keys()), 'xlsx')}"},
+    )
+
+@app.get("/export/{session_id}/xlsx/{table_name}")
+def export_one(session_id: str, table_name: str):
+    data = get_cached_data(session_id)
+    columns = data["tables"].get(table_name)
+    if columns is None:
+        raise HTTPException(404, f"Table '{table_name}' not found")
+
+    anomalies = data.get("byte_anomalies", {}).get(table_name)
+    # Normalize: ensure anomalies is a list of dicts (guard against list of strings)
+    if anomalies:
+        anomalies = [a for a in anomalies if isinstance(a, dict)]
+
+    file_names = sorted({col["file"] for col in columns if col.get("file")})
+    file_name = ", ".join(file_names) if file_names else None
+
+    buf = export_table_xlsx(
+        columns,
+        table_name,
+        anomalies=anomalies,
+        source_db=data.get("source_db"),
+        dest_db=data.get("dest_db"),
+        file_name=file_name,
+    )
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={_make_export_filename([table_name], 'xlsx')}"},
+    )
+
+@app.get("/export/{session_id}/csv")
+def export_all_csv_endpoint(session_id: str, tables: List[str] = Query(default=None)):
+    data = get_cached_data(session_id)
+    all_tables = data["tables"]
+    selected = {k: v for k, v in all_tables.items() if tables is None or k in tables}
+    byte_anomalies = {k: v for k, v in data.get("byte_anomalies", {}).items() if k in selected}
+    
+    buf = export_all_csv(selected, byte_anomalies=byte_anomalies)
+    return StreamingResponse(
+        buf,
+        media_type="text/csv; charset=utf-8-sig",
+        headers={"Content-Disposition": f"attachment; filename={_make_export_filename(list(selected.keys()), 'csv')}"},
+    )
+
+@app.get("/export/{session_id}/csv/{table_name}")
+def export_one_csv(session_id: str, table_name: str):
+    data = get_cached_data(session_id)
+    columns = data["tables"].get(table_name)
+    if columns is None:
+        raise HTTPException(404, f"Table '{table_name}' not found")
+    
+    anomalies = data.get("byte_anomalies", {}).get(table_name)
+    buf = export_table_csv(columns, table_name, anomalies=anomalies)
+    return StreamingResponse(
+        buf,
+        media_type="text/csv; charset=utf-8-sig",
+        headers={"Content-Disposition": f"attachment; filename={_make_export_filename([table_name], 'csv')}"},
+    )

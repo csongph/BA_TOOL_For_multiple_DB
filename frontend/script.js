@@ -1,0 +1,1686 @@
+// ─────────────────────────────────────────────────────────────
+//  SQL File Converter — script.js
+//  Flow:
+//    SQL  → upload → POST /convert (auto) → backend mapping → render
+//    CSV/Excel → parse local → render (ไม่ผ่าน backend)
+//    Override → POST /override/:id → sync ทันที
+// ─────────────────────────────────────────────────────────────
+
+function resolveApiBase() {
+  const configured = (window.API_BASE || '').trim();
+  if (configured) return configured.replace(/\/$/, '');
+
+  const { protocol, hostname, port } = window.location;
+  const isHttp = protocol === 'http:' || protocol === 'https:';
+  const host = hostname || 'localhost';
+
+  if (!isHttp || host === 'localhost') return 'http://localhost:8000';
+  if (host === '127.0.0.1') return 'http://127.0.0.1:8000';
+  if (port === '8000') return `${protocol}//${host}:8000`;
+  return `${protocol}//${host}:8000`;
+}
+
+let API_BASE = resolveApiBase();
+
+async function fetchWithApiFallback(path, options) {
+  const candidates = [API_BASE];
+  if (API_BASE === 'http://localhost:8000') candidates.push('http://127.0.0.1:8000');
+  if (API_BASE === 'http://127.0.0.1:8000') candidates.push('http://localhost:8000');
+
+  let lastErr = null;
+  for (const base of [...new Set(candidates)]) {
+    try {
+      const res = await fetch(`${base}${path}`, options);
+      API_BASE = base;
+      return res;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('Unable to reach API');
+}
+
+// ── State ──────────────────────────────────────────────────
+let currentData   = {};  // { [tableName]: { headers, rows, fileName, fileType, backendCols? } }
+let uploadedFiles = [];  // { name, type, fileObj }
+let sessionId     = null;
+let converted     = false;
+
+// ─── File Input / Drag & Drop ──────────────────────────────
+document.getElementById('fileInput').addEventListener('change', e => handleFiles(e.target.files));
+
+function onDragOver(e)  { e.preventDefault(); document.getElementById('dropzone').classList.add('drag-over'); }
+function onDragLeave()  { document.getElementById('dropzone').classList.remove('drag-over'); }
+function onDrop(e) {
+  e.preventDefault();
+  document.getElementById('dropzone').classList.remove('drag-over');
+  handleFiles(e.dataTransfer.files);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  DATABASE SELECTION
+//  [FIX] ลบ dbTypeMap hardcode ออก — options มาจาก backend
+//        onSourceDbChange / onDestDbChange ใช้ค่าจาก select.value ตรงๆ
+// ═══════════════════════════════════════════════════════════
+
+// ── DB logo map ──────────────────────────────────────────────────────────
+const _DB_LOGOS = {
+  postgres: {
+    label: 'PostgreSQL', color: '#336791',
+    logo: 'images/logo-postgresql.svg'
+  },
+  mysql: {
+    label: 'MySQL', color: '#4479a1',
+    logo: 'images/logo-mysql.svg'
+  },
+  sqlserver: {
+    label: 'SQL Server', color: '#cc2927',
+    logo: 'images/logo-sqlserver.svg'
+  },
+  oracle: {
+    label: 'Oracle', color: '#f80000',
+    logo: 'images/logo-oracle.svg'
+  },
+};
+
+function _dbKey(dbId) {
+  const id = (dbId || '').toLowerCase();
+  if (id.includes('postgres'))                          return 'postgres';
+  if (id.includes('mysql'))                             return 'mysql';
+  if (id.includes('oracle'))                            return 'oracle';
+  if (id.includes('sqlserver') || id.includes('mssql')) return 'sqlserver';
+  return null;
+}
+
+function _renderDbBadge(typeEl, infoEl, dbId) {
+  if (!dbId) {
+    typeEl.innerHTML          = '—';
+    typeEl.style.background   = '';
+    typeEl.style.borderColor  = '';
+    infoEl.innerHTML          = '';
+    return;
+  }
+  const key  = _dbKey(dbId);
+  const meta = key ? _DB_LOGOS[key] : null;
+  if (meta) {
+    typeEl.innerHTML = `
+      <span class="db-brand-mark">
+        <img src="${meta.logo}" alt="${meta.label} logo" class="db-brand-logo">
+      </span>`;
+    typeEl.style.background  = `${meta.color}18`;
+    typeEl.style.borderColor = `${meta.color}66`;
+    infoEl.innerHTML = `<div class="db-details" style="color:${meta.color}bb">${dbId}</div>`;
+  } else {
+    typeEl.textContent        = dbId;
+    typeEl.style.background   = '';
+    typeEl.style.borderColor  = '';
+    infoEl.innerHTML = `<div class="db-details">${dbId}</div>`;
+  }
+}
+
+function onSourceDbChange() {
+  const src = document.getElementById('sourceDbSelect').value;
+  filterDestOptionsForSource(src);
+  _renderDbBadge(
+    document.getElementById('sourceDbType'),
+    document.getElementById('sourceDbInfo'),
+    src
+  );
+}
+
+function onDestDbChange() {
+  _renderDbBadge(
+    document.getElementById('destDbType'),
+    document.getElementById('destDbInfo'),
+    document.getElementById('destDbSelect').value
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+//  HANDLE FILES — entry point
+// ═══════════════════════════════════════════════════════════
+async function handleFiles(files) {
+  if (!files || files.length === 0) return;
+
+  const supported = Array.from(files).filter(f => /\.(csv|xlsx|sql)$/i.test(f.name));
+  if (!supported.length) {
+    showStatus('uploadStatus', 'error', 'ไม่รองรับไฟล์ประเภทนี้ (CSV, Excel, SQL เท่านั้น)');
+    return;
+  }
+
+  // Reset ก่อนเสมอ ไม่ว่า modal จะตัดสินใจอย่างไร
+  currentData   = {};
+  uploadedFiles = [];
+  sessionId     = null;
+  converted     = false;
+  document.getElementById('fileList').innerHTML = '';
+  document.getElementById('convertBtn').disabled = true;
+  clearUI();
+
+  // ── ตรวจ duplicate ก่อนทำอะไรทั้งนั้น ─────────────────
+  const dupIssues = await detectDuplicates(supported);
+  if (dupIssues.length > 0) {
+    const decision = await showDuplicateModal(dupIssues, supported);
+    if (decision === 'cancel') {
+      showStatus('uploadStatus', 'error', '⚠️ ยกเลิกการอัปโหลด — กรุณาเลือกไฟล์ใหม่');
+      return;
+    }
+    // proceed → ดำเนินการต่อแม้จะมี duplicate
+  }
+
+  setLoading(true);
+
+  const sqlFiles   = supported.filter(f => /\.sql$/i.test(f.name));
+  const localFiles = supported.filter(f => /\.(csv|xlsx)$/i.test(f.name));
+
+  // Register all files
+  supported.forEach(f => {
+    const ext  = f.name.split('.').pop().toLowerCase();
+    const type = ext === 'sql' ? 'sql' : ext === 'csv' ? 'csv' : 'excel';
+    uploadedFiles.push({ name: f.name, type, fileObj: f });
+    renderFileChip(f.name, type);
+  });
+
+  // 1. Parse CSV / Excel locally
+  await Promise.all(localFiles.map(f => parseLocalFile(f)));
+
+  // 2. SQL → ส่ง backend ทันที (auto mapping)
+  if (sqlFiles.length > 0) {
+    showStatus('uploadStatus', 'info', `⏳ กำลัง mapping ${sqlFiles.length} SQL file กับ backend...`);
+    await sendSQLToBackend(sqlFiles);
+  } else {
+    setLoading(false);
+    onAllDone();
+  }
+}
+
+// ─── Parse CSV / Excel locally ─────────────────────────────
+function parseLocalFile(file) {
+  return new Promise(resolve => {
+    const ext    = file.name.split('.').pop().toLowerCase();
+    const reader = new FileReader();
+
+    if (ext === 'csv') {
+      reader.onload = e => {
+        try { parseCSV(file.name, e.target.result); } catch {}
+        resolve();
+      };
+      reader.readAsText(file, 'utf-8');
+    } else {
+      reader.onload = e => {
+        try {
+          const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
+          wb.SheetNames.forEach(sheet => {
+            const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheet]);
+            if (rows.length > 0) {
+              const key = file.name.replace(/\.[^/.]+$/, '') +
+                          (wb.SheetNames.length > 1 ? '_' + sheet : '');
+              currentData[key] = { headers: Object.keys(rows[0]), rows, fileName: file.name, fileType: 'excel' };
+            }
+          });
+        } catch {}
+        resolve();
+      };
+      reader.readAsArrayBuffer(file);
+    }
+  });
+}
+
+// ─── CSV parser ─────────────────────────────────────────────
+function parseCSV(fileName, text) {
+  const lines    = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  const nonEmpty = lines.filter(l => l.trim());
+  if (nonEmpty.length < 2) return;
+  const headers = parseCSVLine(nonEmpty[0]);
+  const rows    = nonEmpty.slice(1).map(line => {
+    const vals = parseCSVLine(line);
+    return headers.reduce((obj, h, i) => { obj[h] = vals[i] ?? ''; return obj; }, {});
+  });
+  currentData[fileName.replace(/\.[^/.]+$/, '')] = { headers, rows, fileName, fileType: 'csv' };
+}
+
+function parseCSVLine(line) {
+  const result = []; let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQ && line[i+1] === '"') { cur += '"'; i++; } else inQ = !inQ;
+    } else if (ch === ',' && !inQ) { result.push(cur.trim()); cur = ''; }
+    else cur += ch;
+  }
+  result.push(cur.trim());
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  BACKEND — POST /convert  (auto-trigger เมื่อ upload SQL)
+// ═══════════════════════════════════════════════════════════
+async function sendSQLToBackend(sqlFiles) {
+  const sourceDb = document.getElementById('sourceDbSelect').value;
+  const destDb   = document.getElementById('destDbSelect').value;
+
+  if (!sourceDb || !destDb) {
+    showStatus('uploadStatus', 'error', '❌ กรุณาเลือก Source และ Destination Database ก่อน');
+    setLoading(false);
+    onAllDone();
+    return;
+  }
+
+  const form = new FormData();
+  sqlFiles.forEach(f => form.append('files', f, f.name));
+  form.append('source_db', sourceDb);
+  form.append('dest_db',   destDb);
+
+  try {
+    const res = await fetchWithApiFallback('/convert', { method: 'POST', body: form });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+
+    const data = await res.json();
+    sessionId = data.session_id;
+
+    // ใส่ backend mapping result เข้า currentData
+    applyBackendTables(
+      data.tables,
+      data.unknown || {},
+      data.byte_anomalies || {},
+      data.duplicate_tables || {},
+      data.fk_errors || []
+    );
+
+    const unknownCount = Object.values(data.unknown || {}).flat().length;
+    const anomalyCount = Object.values(data.byte_anomalies || {}).flat().length;
+    const contentDups  = data.content_dup_warnings || [];
+
+    if (unknownCount > 0) renderUnknownWarnings(data.unknown);
+    if (data.fk_errors && data.fk_errors.length > 0) renderFKErrors(data.fk_errors);
+    if (anomalyCount > 0) renderByteAnomalyWarnings(data.byte_anomalies);
+    if (contentDups.length > 0) renderContentDupWarnings(contentDups);
+
+    const dbPairLabel = data.source_db && data.dest_db
+      ? ` [${data.source_db} → ${data.dest_db}]` : '';
+    showStatus('uploadStatus', 'success',
+      `✓ Backend mapping สำเร็จ${dbPairLabel} — ${Object.keys(data.tables).length} table` +
+      (unknownCount ? ` (⚠️ ${unknownCount} unknown type)` : '') +
+      (anomalyCount ? ` (🔴 ${anomalyCount} byte anomaly)` : '') +
+      (contentDups.length ? ` (🔁 ${contentDups.length} content ซ้ำ)` : '')
+    );
+
+  } catch (err) {
+    showStatus('uploadStatus', 'error', '❌ Backend: ' + err.message);
+  } finally {
+    setLoading(false);
+    onAllDone();
+  }
+}
+
+// ── นำ backend result มาใส่ currentData ──────────────────
+function applyBackendTables(tables, unknown, byteAnomalies = {}, duplicateTables = {}, fkErrors = []) {
+  // รวม table ชื่อที่ backend รู้ว่าซ้ำ (ทั้งตัวต้นฉบับ และ ตัวซ้ำ)
+  const dupTableNames = new Set(Object.keys(duplicateTables));
+
+  Object.entries(tables).forEach(([tableKey, cols]) => {
+    const fileName    = cols[0]?.file || 'unknown.sql';
+    // is_duplicate จาก backend = true เฉพาะตัวซ้ำตัวหลัง
+    // ตรวจ key มี __ = ตัวซ้ำตัวหลัง, หรือ baseName อยู่ใน dupTableNames = ตัวต้นฉบับที่มีคู่ซ้ำ
+    const baseName    = tableKey.includes('__') ? tableKey.split('__')[0] : tableKey;
+    const isDuplicate = cols[0]?.is_duplicate || tableKey.includes('__') || dupTableNames.has(baseName);
+    const unknownCols = (unknown[tableKey] || []).map(u => u.column_name || u.column);
+    const anomalyCols = (byteAnomalies[tableKey] || []).filter(a => a && typeof a === 'object').map(a => a.column_name);
+    const tableFkErrors = (fkErrors || []).filter(e => e.table === tableKey || e.table === baseName);
+
+    currentData[tableKey] = {
+      headers    : cols.map(c => c.column_name),
+      rows       : [],
+      fileName,
+      fileType   : 'sql',
+      isDuplicate,
+      backendCols: cols.map(c => {
+        const fkError = tableFkErrors.find(e => e.column === c.column_name);
+        return {
+          ...c,
+          isUnknown    : unknownCols.includes(c.column_name),
+          isByteAnomaly: anomalyCols.includes(c.column_name),
+          fkError,
+        };
+      })
+    };
+  });
+}
+
+// ── หลังทุก file พร้อม ─────────────────────────────────────
+function onAllDone() {
+  converted = true;
+  const tableCount = Object.keys(currentData).length;
+  const rowCount   = Object.values(currentData).reduce((s, t) => s + t.rows.length, 0);
+
+  updateStats(uploadedFiles.length, tableCount, rowCount);
+  updateBadges(tableCount, rowCount, sessionId ? 'mapped' : 'loaded');
+  renderTypePanel();
+  renderTables();
+  document.getElementById('convertBtn').disabled = false;
+
+  // แสดง session card
+  if (sessionId) {
+    const card = document.getElementById('sessionCard');
+    const disp = document.getElementById('sessionIdDisplay');
+    if (card) card.style.display = 'block';
+    if (disp) disp.textContent   = sessionId;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  CONVERT BUTTON — re-send SQL ไป backend (refresh mapping)
+// ═══════════════════════════════════════════════════════════
+async function convertData() {
+  const sqlFiles = uploadedFiles.filter(f => f.type === 'sql').map(f => f.fileObj);
+
+  if (!sqlFiles.length) {
+    showStatus('convertStatus', 'success', '✓ ไม่มีไฟล์ SQL — ข้อมูล local พร้อมแล้ว');
+    return;
+  }
+
+  const sourceDb = document.getElementById('sourceDbSelect').value;
+  const destDb   = document.getElementById('destDbSelect').value;
+  if (!sourceDb || !destDb) {
+    showStatus('convertStatus', 'error', '❌ กรุณาเลือก Source และ Destination Database ก่อน');
+    return;
+  }
+
+  if (sessionId) await deleteSession(true);
+
+  setLoading(true);
+  showStatus('convertStatus', 'info', '⏳ Re-mapping กับ backend...');
+  await sendSQLToBackend(sqlFiles);
+  setLoading(false);
+
+  // อัปเดต session card
+  const card = document.getElementById('sessionCard');
+  const disp = document.getElementById('sessionIdDisplay');
+  if (sessionId) {
+    if (card) card.style.display = 'block';
+    if (disp) disp.textContent = sessionId;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+//  OVERRIDE — POST /override/:id
+// ═══════════════════════════════════════════════════════════
+async function applyOverride(tableName, columnName, newType, selectEl) {
+  // อัปเดต local ก่อน
+  const t = currentData[tableName];
+  if (t?.backendCols) {
+    const col = t.backendCols.find(c => c.column_name === columnName);
+    if (col) col.final_type = newType;
+  }
+
+  if (!sessionId) {
+    flashSelect(selectEl, 'local');
+    reRenderCardPills(tableName);
+    return;
+  }
+
+  try {
+    const res = await fetchWithApiFallback(`/override/${sessionId}`, {
+      method : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body   : JSON.stringify({ table: tableName, column: columnName, new_type: newType })
+    });
+
+    if (!res.ok) throw new Error((await res.json().catch(()=>({}))).detail || res.statusText);
+
+    const updated = await res.json();
+    if (t?.backendCols && updated.updated_column) {
+      const col = t.backendCols.find(c => c.column_name === columnName);
+      if (col) Object.assign(col, updated.updated_column);
+    }
+    await syncSessionDiagnostics();
+    flashSelect(selectEl, 'ok');
+    reRenderCardPills(tableName);
+
+  } catch (err) {
+    flashSelect(selectEl, 'err');
+    showStatus('convertStatus', 'error', '❌ Override: ' + err.message);
+  }
+}
+
+function flashSelect(el, state) {
+  if (!el) return;
+  el.classList.remove('saved', 'err-flash');
+  void el.offsetWidth;
+  if (state === 'ok' || state === 'local') {
+    el.classList.add('saved');
+    setTimeout(() => el.classList.remove('saved'), 1200);
+  } else {
+    el.classList.add('err-flash');
+    setTimeout(() => el.classList.remove('err-flash'), 1200);
+  }
+}
+
+function reRenderCardPills(tableName) {
+  const el = document.getElementById('pills-' + tableName);
+  if (!el) return;
+  const t = currentData[tableName];
+  if (t?.backendCols) el.innerHTML = buildPillsHTML(t.backendCols);
+}
+
+async function syncSessionDiagnostics() {
+  if (!sessionId) return;
+
+  const res = await fetchWithApiFallback(`/result/${sessionId}`);
+  if (!res.ok) {
+    throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+  }
+
+  const data = await res.json();
+  applyBackendTables(
+    data.tables,
+    data.unknown || {},
+    data.byte_anomalies || {},
+    data.duplicate_tables || {},
+    data.fk_errors || []
+  );
+
+  document.getElementById('unknownWarnings')?.remove();
+  document.getElementById('byteAnomalyWarnings')?.remove();
+  document.getElementById('fkErrorPanel')?.remove();
+
+  if (Object.values(data.unknown || {}).flat().length > 0) renderUnknownWarnings(data.unknown);
+  if ((data.fk_errors || []).length > 0) renderFKErrors(data.fk_errors);
+  if (Object.values(data.byte_anomalies || {}).flat().length > 0) {
+    renderByteAnomalyWarnings(data.byte_anomalies);
+  }
+
+  renderTypePanel();
+  renderTables();
+}
+
+// ═══════════════════════════════════════════════════════════
+//  RESULT / DELETE SESSION
+// ═══════════════════════════════════════════════════════════
+async function fetchResult() {
+  if (!sessionId) { showStatus('convertStatus', 'error', 'ยังไม่มี session'); return; }
+  setLoading(true);
+  try {
+    const res = await fetchWithApiFallback(`/result/${sessionId}`);
+    if (!res.ok) throw new Error((await res.json().catch(()=>({}))).detail || res.statusText);
+    const data = await res.json();
+    applyBackendTables(
+      data.tables,
+      data.unknown || {},
+      data.byte_anomalies || {},
+      data.duplicate_tables || {},
+      data.fk_errors || []
+    );
+    if (Object.values(data.byte_anomalies || {}).flat().length > 0)
+      renderByteAnomalyWarnings(data.byte_anomalies);
+    renderTypePanel();
+    renderTables();
+    showStatus('convertStatus', 'success', '✓ Refresh result สำเร็จ');
+  } catch (err) {
+    showStatus('convertStatus', 'error', '❌ ' + err.message);
+  } finally { setLoading(false); }
+}
+
+async function deleteSession(silent = false) {
+  if (!sessionId) return;
+  try {
+    await fetchWithApiFallback(`/session/${sessionId}`, { method: 'DELETE' });
+    if (!silent) showStatus('convertStatus', 'success', '✓ ลบ session แล้ว');
+  } catch {}
+  sessionId = null;
+}
+
+async function handleDeleteSession() {
+  await deleteSession();
+  const card = document.getElementById('sessionCard');
+  const disp = document.getElementById('sessionIdDisplay');
+  if (card) card.style.display = 'none';
+  if (disp) disp.textContent   = '—';
+}
+
+// ═══════════════════════════════════════════════════════════
+//  TYPE PANEL (sidebar) — แสดง mapping จาก backend
+// ═══════════════════════════════════════════════════════════
+function renderTypePanel() {
+  const body = document.getElementById('typeTableBody');
+  if (!body) return;
+  const keys  = Object.keys(currentData);
+
+  if (!keys.length) {
+    body.innerHTML = '<tr><td colspan="3"><div class="empty-hint">No file loaded</div></td></tr>';
+    return;
+  }
+
+  // หา SQL table แรก
+  const sqlKey = keys.find(k => currentData[k].backendCols);
+
+  if (sqlKey) {
+    const cols = currentData[sqlKey].backendCols;
+    body.innerHTML = cols.map(col => `
+      <tr class="${col.isUnknown ? 'row-unknown' : ''}">
+        <td>
+          <span class="col-name">${col.column_name}</span>
+          ${col.isUnknown ? '<span class="unk-badge">?</span>' : ''}
+        </td>
+        <td>
+          <span class="inferred-badge">${col.logical_type || col.raw_type || '—'}</span>
+          <div class="src-type">${col.source_sql_type || ''}</div>
+        </td>
+        <td>
+          <select class="type-select"
+            onchange="applyOverride('${sqlKey}','${col.column_name}',this.value,this)">
+            ${buildTypeOptions(col.final_type || col.source_sql_type || '')}
+          </select>
+        </td>
+      </tr>`).join('');
+  } else {
+    // CSV/Excel — infer local
+    const firstKey = keys[0];
+    const first = currentData[firstKey];
+    body.innerHTML = first.headers.map(h => {
+      const inf = inferLocalType(first.rows.map(r => r[h]));
+      return `<tr>
+        <td><span class="col-name">${h}</span></td>
+        <td><span class="inferred-badge">${inf}</span></td>
+        <td>
+          <select class="type-select"
+            onchange="applyOverride('${firstKey}','${h}',this.value,this)">
+            ${buildTypeOptions(inf)}
+          </select>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+}
+
+function inferLocalType(values) {
+  const s = values.filter(v => v !== '' && v != null).slice(0, 50);
+  if (!s.length)                                    return 'VARCHAR';
+  if (s.every(v => /^-?\d+$/.test(v)))             return 'INT';
+  if (s.every(v => /^-?\d+(\.\d+)?$/.test(v)))     return 'DECIMAL';
+  if (s.every(v => /^\d{4}-\d{2}-\d{2}/.test(v))) return 'DATE';
+  if (s.every(v => /^(true|false|0|1)$/i.test(v))) return 'BOOLEAN';
+  return 'VARCHAR';
+}
+
+function buildTypeOptions(selected = '') {
+  const types = ['VARCHAR','NVARCHAR','NVARCHAR(MAX)','CHAR',
+                 'INT','BIGINT','SMALLINT','TINYINT',
+                 'DECIMAL','FLOAT','DOUBLE','NUMBER',
+                 'DATE','DATETIME','TIMESTAMP',
+                 'BOOLEAN','BIT','TEXT','NTEXT'];
+  const list = types.includes(selected) ? types : (selected ? [selected, ...types] : types);
+  return list.map(t => `<option${t === selected ? ' selected' : ''}>${t}</option>`).join('');
+}
+
+// ═══════════════════════════════════════════════════════════
+//  RENDER TABLES
+// ═══════════════════════════════════════════════════════════
+const FILE_TYPE_META = {
+  csv  : { label:'CSV',   icon:'📄', color:'var(--accent)',  dim:'rgba(0,214,143,0.12)' },
+  excel: { label:'Excel', icon:'📊', color:'var(--accent2)', dim:'rgba(0,148,255,0.12)' },
+  sql  : { label:'SQL',   icon:'🗃️',  color:'var(--warn)',    dim:'rgba(245,166,35,0.12)' },
+};
+
+function renderTables() {
+  const grid = document.getElementById('tablesGrid');
+  const bulk = document.getElementById('bulkSection');
+  const keys  = Object.keys(currentData);
+
+  if (!keys.length) {
+    grid.innerHTML = `<div class="empty-state">
+      <div class="empty-state-icon">📭</div>
+      <div class="empty-state-text">ไม่พบตารางในไฟล์นี้</div>
+    </div>`;
+    bulk.classList.remove('visible');
+    return;
+  }
+
+  const groups = {};
+  keys.forEach(k => {
+    const ft = currentData[k].fileType || 'csv';
+    if (!groups[ft]) groups[ft] = [];
+    groups[ft].push(k);
+  });
+
+  bulk.classList.add('visible');
+
+  grid.innerHTML = ['csv','excel','sql'].filter(ft => groups[ft]).map(ft => {
+    const meta      = FILE_TYPE_META[ft];
+    const tkeys     = groups[ft];
+    const totalRows = tkeys.reduce((s, k) => s + currentData[k].rows.length, 0);
+    return `
+      <div class="type-group">
+        <div class="type-group-header" style="--g-color:${meta.color};--g-dim:${meta.dim}">
+          <span class="type-group-icon">${meta.icon}</span>
+          <span class="type-group-label">${meta.label}</span>
+          <span class="type-group-count">${tkeys.length} table${tkeys.length>1?'s':''} · ${totalRows.toLocaleString()} rows</span>
+          <div class="type-group-line"></div>
+        </div>
+        <div class="tables-subgrid">
+          ${tkeys.map(k => buildTableCard(k)).join('')}
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function buildTableCard(k) {
+  const t     = currentData[k];
+  const isSql = !!t.backendCols;
+
+  // Backend column pills (SQL only)
+  const pillsBlock = isSql
+    ? `<div class="backend-cols" id="pills-${k}">${buildPillsHTML(t.backendCols)}</div>`
+    : '';
+
+  // Data preview — ตรงกับข้อมูลที่ export จริง
+  const previewCols = isSql ? MAP_HEADERS : t.headers;
+  const previewSrc  = isSql ? toMappingRows(t.backendCols) : t.rows;
+  const previewRows = previewSrc;
+
+  const dupBannerRow = t.isDuplicate
+    ? `<tr><th colspan="${previewCols.length || 1}" class="preview-th-dup">⚠ DUPLICATE TABLE</th></tr>`
+    : '';
+  const theadHtml = previewCols.map((h, idx) =>
+    `<th class="${idx === 0 && isSql ? 'preview-th-num' : ''}" title="${escapeHtmlAttr(h)}">${escapeHtml(h)}</th>`).join('');
+  const tbodyHtml = previewRows.map((r, i) =>
+    `<tr class="${i % 2 === 1 ? 'preview-row-alt' : ''}">
+      ${previewCols.map((h, idx) =>
+        `<td class="${idx === 0 && isSql ? 'preview-td-num' : ''}">${escapeHtml(String(r[h] ?? ''))}</td>`
+      ).join('')}
+    </tr>`
+  ).join('');
+  const noDataHtml = `<tr><td colspan="${previewCols.length || 1}" class="no-data-cell">No data</td></tr>`;
+
+  const sessionTag = sessionId
+    ? `<span class="session-tag" title="session: ${sessionId}">🔗 mapped</span>` : '';
+
+  return `
+  <div class="table-card${t.isDuplicate ? ' is-duplicate' : ''}">
+    <div class="table-card-header" onclick="openTableModal('${k}')" title="คลิกเพื่อดูตารางแบบเต็ม">
+      <div class="table-card-icon">${isSql ? '🗃️' : '📊'}</div>
+      <div style="min-width:0;flex:1">
+        <div class="table-card-name" title="${k}">
+          ${k.includes('__') ? k.split('__')[0] : k}
+          ${sessionTag}
+          ${t.isDuplicate ? '<span class="dup-badge">⚠ DUPLICATE</span>' : ''}
+        </div>
+        <div class="table-card-meta">
+          <span>${t.headers.length}</span> cols ·
+          ${isSql
+            ? `<span class="mapped-label">backend mapped</span> · ${t.fileName}`
+            : `<span>${t.rows.length.toLocaleString()}</span> rows · ${t.fileName}`}
+        </div>
+      </div>
+      <div class="expand-hint">
+        <svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+          <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
+          <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
+        </svg>
+        expand
+      </div>
+    </div>
+    ${pillsBlock}
+    <div class="preview-wrap">
+      <table class="preview-table">
+        <thead>${dupBannerRow}<tr>${theadHtml || '<th>—</th>'}</tr></thead>
+        <tbody>${tbodyHtml || noDataHtml}</tbody>
+      </table>
+    </div>
+
+    <div class="table-card-actions">
+      ${isSql ? `
+      <button class="btn-card-dl xlsx" onclick="downloadTableXLSX('${k}')">⬇ Mapping XLSX</button>
+      ` : `
+      <button class="btn-card-dl csv"  onclick="downloadTable('${k}','csv')">⬇ CSV</button>
+      <button class="btn-card-dl xlsx" onclick="downloadTable('${k}','xlsx')">⬇ XLSX</button>
+      `}
+    </div>
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  BUILD TYPE FLOW — แสดงการแปลง type จาก source ไป final
+// ═══════════════════════════════════════════════════════════
+function buildTypeFlowHTML(backendCols) {
+  if (!backendCols.length) {
+    return `<span class="bcol-empty-hint">ไม่มีคอลัมน์</span>`;
+  }
+
+  return backendCols.map(c => {
+    const constraintBadges = [];
+    if (c.is_pk) constraintBadges.push('<span class="type-badge badge-pk">🔑 PK</span>');
+    if (c.fk) constraintBadges.push(
+      `<span class="type-badge badge-fk" title="FK → ${c.fk.ref_table}.${c.fk.ref_column || '?'}">🔗 FK</span>`
+    );
+    if (c.isUnknown) constraintBadges.push('<span class="type-badge badge-unknown">❓ Unknown</span>');
+    if (c.isByteAnomaly) constraintBadges.push('<span class="type-badge badge-anomaly">🔴 Anomaly</span>');
+
+    const typeFlow = [
+      c.source_sql_type,
+      c.raw_type,
+      c.logical_type,
+      c.standard_type,
+      c.final_type,
+    ].filter(t => t).map((t, i) => {
+      const badges = ['source', 'raw', 'logical', 'standard', 'final'];
+      const badgeClass = badges[i] || 'unknown';
+      return `<span class="type-badge badge-${badgeClass}">${t}</span>`;
+    });
+
+    const nullableInd = c.nullable && c.nullable.toUpperCase() === 'NOT NULL' ? '❌' : '✓';
+
+    return `
+    <div class="type-flow-row">
+      <div class="column-info">
+        <span class="col-name">${c.column_name}</span>
+        <span class="nullable-ind" title="${c.nullable}">${nullableInd}</span>
+      </div>
+      <div class="type-flow-badges">
+        ${typeFlow.join('<span class="flow-arrow">→</span>')}
+      </div>
+      <div class="constraint-badges">
+        ${constraintBadges.join('')}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ── Unknown type warnings ─────────────────────────────────
+function renderUnknownWarnings(unknown) {
+  document.getElementById('unknownWarnings')?.remove();
+  const items = Object.entries(unknown).flatMap(([tbl, cols]) =>
+    cols.map(c => `<li><b>${tbl}</b>.<span>${c.column_name}</span> — ${c.reason||'ไม่รู้จัก type'}</li>`)
+  );
+  if (!items.length) return;
+  const div = document.createElement('div');
+  div.id        = 'unknownWarnings';
+  div.className = 'warn-panel';
+  div.innerHTML = `
+    <div class="warn-panel-header">
+      ⚠️ Unknown Types (${items.length})
+      <button onclick="this.parentElement.parentElement.remove()">✕</button>
+    </div>
+    <ul>${items.join('')}</ul>`;
+  document.getElementById('tablesGrid').insertAdjacentElement('beforebegin', div);
+}
+
+// ── Byte anomaly warnings ─────────────────────────────────
+function renderByteAnomalyWarnings(byteAnomalies) {
+  document.getElementById('byteAnomalyWarnings')?.remove();
+  const items = Object.entries(byteAnomalies).flatMap(([tbl, cols]) =>
+    cols
+      .filter(c => c && typeof c === 'object')  // skip string entries
+      .map(c => `
+      <li>
+        <div class="anomaly-row">
+          <span class="anomaly-loc"><b>${tbl}</b>.<code>${c.column_name}</code></span>
+          <span class="anomaly-tag">source: <em>${c.source_type}</em> → raw: <em>${c.raw_type}</em></span>
+        </div>
+        <div class="anomaly-detail">${c.detail || ''}</div>
+        <div class="anomaly-file">📄 ${c.file || ''}</div>
+      </li>`)
+  );
+  if (!items.length) return;
+
+  const div = document.createElement('div');
+  div.id        = 'byteAnomalyWarnings';
+  div.className = 'warn-panel byte-anomaly-panel';
+  div.innerHTML = `
+    <div class="warn-panel-header byte-anomaly-header">
+      <span>🔴 ตรวจพบข้อมูลไม่ปกติ — Byte Conversion Anomaly (${items.length} คอลัมน์)</span>
+      <div class="anomaly-actions">
+        <span class="anomaly-hint">คอลัมน์เหล่านี้ถูกแปลงเป็น byte แต่ type ต้นทางไม่ใช่ decimal — กรุณาตรวจสอบ mapping</span>
+        <button onclick="this.closest('#byteAnomalyWarnings').remove()">✕</button>
+      </div>
+    </div>
+    <ul>${items.join('')}</ul>`;
+  document.getElementById('tablesGrid').insertAdjacentElement('beforebegin', div);
+}
+
+// ── Content duplicate warnings ───────────────────────────
+function renderContentDupWarnings(warnings) {
+  document.getElementById('contentDupWarnings')?.remove();
+  const items = warnings.map(w => `
+    <li>
+      <div class="anomaly-row">
+        <span class="anomaly-loc"><b>${w.file}</b></span>
+        <span class="anomaly-tag">🔁 เหมือนกับ <em>${w.duplicate_of}</em></span>
+      </div>
+      <div class="anomaly-detail">${w.msg}</div>
+    </li>`);
+  const div = document.createElement('div');
+  div.id        = 'contentDupWarnings';
+  div.className = 'warn-panel';
+  div.innerHTML = `
+    <div class="warn-panel-header">
+      🔁 พบไฟล์ที่มีเนื้อหาซ้ำกัน (${warnings.length} ไฟล์) — แยก table ให้อัตโนมัติแล้ว
+      <button onclick="this.parentElement.parentElement.remove()">✕</button>
+    </div>
+    <ul>${items.join('')}</ul>`;
+  document.getElementById('tablesGrid').insertAdjacentElement('beforebegin', div);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  DOWNLOAD
+// ═══════════════════════════════════════════════════════════
+const MAP_HEADERS = ['file','ลำดับ','column_name','source_sql_type','raw_type','logical_type','final_type','nullable','is_pk','fk_ref'];
+
+function toMappingRows(backendCols) {
+  return backendCols.map((c, i) => ({
+    'ลำดับ'          : i + 1,
+    column_name     : c.column_name,
+    file            : c.file            || '',
+    raw_type        : c.raw_type        || '',
+    logical_type    : c.logical_type    || '',
+    final_type      : c.final_type      || '',
+    source_sql_type : c.source_sql_type || '',
+    nullable        : c.nullable        || 'NULL',
+    is_pk           : c.is_pk ? 'PK' : '',
+    fk_ref          : c.fk ? `${c.fk.ref_table}.${c.fk.ref_column || '?'}` : '',
+  }));
+}
+
+async function downloadTable(key, fmt) {
+  const t = currentData[key];
+  if (!t) return;
+
+  if (t.backendCols && sessionId && fmt === 'csv') {
+    setLoading(true);
+    try {
+      const res = await fetchWithApiFallback(`/export/${sessionId}/csv/${key}`);
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+      triggerDownload(await res.blob(), `${key}.csv`);
+    } catch (err) {
+      showStatus('convertStatus', 'error', '❌ ' + err.message);
+    } finally { setLoading(false); }
+    return;
+  }
+
+  const headers = t.backendCols ? MAP_HEADERS : t.headers;
+  const rows    = t.backendCols ? toMappingRows(t.backendCols) : t.rows;
+  const name    = t.backendCols ? key + '_mapping' : key;
+
+  if (fmt === 'csv') {
+    const body = [headers.map(escCSV).join(','),
+      ...rows.map(r => headers.map(h => escCSV(r[h] ?? '')).join(','))
+    ].join('\n');
+    triggerDownload(new Blob(['\uFEFF' + body], { type: 'text/csv;charset=utf-8;' }), name + '.csv');
+  } else {
+    const wb = XLSX.utils.book_new();
+    const ws = makeSheet(rows, headers);
+    if (t.backendCols) ws['!cols'] = [{wch:8},{wch:24},{wch:16},{wch:14},{wch:14},{wch:20},{wch:32},{wch:12}];
+    XLSX.utils.book_append_sheet(wb, ws, 'data');
+    XLSX.writeFile(wb, name + '.xlsx');
+  }
+}
+
+async function downloadAllCSV() { showTableSelectorModal('csv'); }
+
+function downloadAllExcel() {
+  const keys = Object.keys(currentData);
+  if (!keys.length) return;
+  const wb = XLSX.utils.book_new();
+
+  keys.forEach(k => {
+    const t       = currentData[k];
+    const headers = t.backendCols ? MAP_HEADERS : t.headers;
+    const rows    = t.backendCols ? toMappingRows(t.backendCols) : t.rows;
+    const ws      = makeSheet(rows, headers);
+    if (t.backendCols) ws['!cols'] = [{wch:8},{wch:24},{wch:16},{wch:14},{wch:14},{wch:20},{wch:32},{wch:12}];
+    XLSX.utils.book_append_sheet(wb, ws, k.substring(0, 31));
+  });
+
+  XLSX.writeFile(wb, makeExportFilename(keys, 'xlsx'));
+  showStatus('convertStatus', 'success', '✓ ดาวน์โหลด Excel สำเร็จ');
+}
+
+// สร้าง worksheet รองรับทั้ง rows มีข้อมูลและ rows ว่าง
+function makeSheet(rows, headers) {
+  if (rows.length) return XLSX.utils.json_to_sheet(rows, { header: headers });
+  return XLSX.utils.aoa_to_sheet([headers]);  // headers-only เมื่อไม่มีข้อมูล
+}
+
+function dlCSV(name, table) {
+  const body = [table.headers.map(escCSV).join(','),
+    ...table.rows.map(r => table.headers.map(h => escCSV(r[h] ?? '')).join(','))
+  ].join('\n');
+  triggerDownload(new Blob(['\uFEFF' + body], { type: 'text/csv;charset=utf-8;' }), name + '.csv');
+}
+
+function dlExcel(name, table) {
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, makeSheet(table.rows, table.headers), name.substring(0, 31));
+  XLSX.writeFile(wb, name + '.xlsx');
+}
+
+function escCSV(v) {
+  const s = String(v);
+  return (s.includes(',')||s.includes('"')||s.includes('\n')) ? '"'+s.replace(/"/g,'""')+'"' : s;
+}
+
+function triggerDownload(blob, filename) {
+  const a = Object.assign(document.createElement('a'),
+    { href: URL.createObjectURL(blob), download: filename, style: 'display:none' });
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}
+
+function makeExportFilename(tableKeys, ext) {
+  const clean = tableKeys.map(k => k.replace(/[^\w]/g, '_'));
+  const joined = clean.join('_').substring(0, 200);
+  return `${joined}_confluent.${ext}`;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  FULLSCREEN TABLE MODAL
+// ═══════════════════════════════════════════════════════════
+let _modalKey      = null;
+let _modalSort     = { col: null, dir: 'asc' };
+let _modalFilter   = '';
+
+function openTableModal(key) {
+  _modalKey    = key;
+  _modalSort   = { col: null, dir: 'asc' };
+  _modalFilter = '';
+
+  const t     = currentData[key];
+  const isSql = !!t.backendCols;
+  const cols  = isSql ? MAP_HEADERS : t.headers;
+  const src   = isSql ? toMappingRows(t.backendCols) : t.rows;
+
+  // Build overlay
+  const overlay = document.createElement('div');
+  overlay.className = 'table-modal-overlay';
+  overlay.id        = 'tableModalOverlay';
+  overlay.addEventListener('click', e => { if (e.target === overlay) closeTableModal(); });
+
+  overlay.innerHTML = `
+    <div class="table-modal" id="tableModal">
+      <div class="table-modal-header">
+        <div class="table-modal-icon">${isSql ? '🗃️' : '📊'}</div>
+        <div style="min-width:0;flex:1">
+          <div class="table-modal-title">${key.includes('__') ? key.split('__')[0] : key}${currentData[key]?.isDuplicate ? ' <span class="dup-badge">⚠ DUPLICATE</span>' : ''}</div>
+          <div class="table-modal-meta">${cols.length} cols · ${src.length.toLocaleString()} rows · ${t.fileName}</div>
+        </div>
+        <div class="table-modal-search">
+          <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <input type="text" id="modalSearchInput" placeholder="ค้นหา..." oninput="onModalSearch(this.value)" autocomplete="off">
+        </div>
+        <button class="table-modal-close" onclick="closeTableModal()" title="ปิด (Esc)">✕</button>
+      </div>
+      <div class="table-modal-toolbar">
+        ${isSql ? `
+        <button class="btn-card-dl xlsx" style="flex:0;padding:6px 14px;font-size:0.75em"
+          onclick="downloadTableXLSX('${key}')">⬇ Mapping XLSX</button>
+        ` : `
+        <button class="btn-card-dl csv" style="flex:0;padding:6px 14px;font-size:0.75em"
+          onclick="downloadTable('${key}','csv')">⬇ CSV</button>
+        <button class="btn-card-dl xlsx" style="flex:0;padding:6px 14px;font-size:0.75em"
+          onclick="downloadTable('${key}','xlsx')">⬇ XLSX</button>
+        `}
+        <div class="modal-row-count" id="modalRowCount">
+          แสดง <span id="modalVisibleCount">${src.length.toLocaleString()}</span> / ${src.length.toLocaleString()} แถว
+        </div>
+      </div>
+      <div class="table-modal-body" id="tableModalBody">
+        <!-- filled by renderModalTable -->
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+  document.body.style.overflow = 'hidden';
+
+  renderModalTable(cols, src, isSql);
+
+  // Focus search
+  setTimeout(() => document.getElementById('modalSearchInput')?.focus(), 50);
+}
+
+function closeTableModal() {
+  const overlay = document.getElementById('tableModalOverlay');
+  if (overlay) overlay.remove();
+  document.body.style.overflow = '';
+  _modalKey = null;
+}
+
+function onModalSearch(val) {
+  _modalFilter = val.toLowerCase().trim();
+  const t     = currentData[_modalKey];
+  if (!t) return;
+  const isSql = !!t.backendCols;
+  const cols  = isSql ? MAP_HEADERS : t.headers;
+  const src   = isSql ? toMappingRows(t.backendCols) : t.rows;
+  renderModalTable(cols, src, isSql);
+}
+
+function onModalSort(colIdx) {
+  const t     = currentData[_modalKey];
+  if (!t) return;
+  const isSql = !!t.backendCols;
+  const cols  = isSql ? MAP_HEADERS : t.headers;
+  const src   = isSql ? toMappingRows(t.backendCols) : t.rows;
+
+  const col = cols[colIdx];
+  if (_modalSort.col === col) {
+    _modalSort.dir = _modalSort.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    _modalSort.col = col;
+    _modalSort.dir = 'asc';
+  }
+  renderModalTable(cols, src, isSql);
+}
+
+function renderModalTable(cols, src, isSql) {
+  // 1. Filter
+  let rows = src;
+  if (_modalFilter) {
+    rows = src.filter(r =>
+      cols.some(h => String(r[h] ?? '').toLowerCase().includes(_modalFilter))
+    );
+  }
+
+  // 2. Sort
+  if (_modalSort.col) {
+    const sc = _modalSort.col;
+    const dir = _modalSort.dir === 'asc' ? 1 : -1;
+    rows = [...rows].sort((a, b) => {
+      const av = String(a[sc] ?? ''), bv = String(b[sc] ?? '');
+      const an = parseFloat(av), bn = parseFloat(bv);
+      if (!isNaN(an) && !isNaN(bn)) return (an - bn) * dir;
+      return av.localeCompare(bv) * dir;
+    });
+  }
+
+  // 3. Update row count
+  const countEl = document.getElementById('modalVisibleCount');
+  if (countEl) countEl.textContent = rows.length.toLocaleString();
+
+  // 4. Build table HTML
+  const hl = _modalFilter;
+
+  function hlCell(val) {
+    const s = String(val ?? '');
+    if (!hl) return escapeHtml(s);
+    const idx = s.toLowerCase().indexOf(hl);
+    if (idx === -1) return escapeHtml(s);
+    return (
+      escapeHtml(s.slice(0, idx)) +
+      '<mark>' + escapeHtml(s.slice(idx, idx + hl.length)) + '</mark>' +
+      escapeHtml(s.slice(idx + hl.length))
+    );
+  }
+
+  const theadHtml = cols.map((h, i) => {
+    const isSorted = _modalSort.col === h;
+    const sortCls  = isSorted ? (_modalSort.dir === 'asc' ? 'sorted-asc' : 'sorted-desc') : '';
+    const icon     = isSorted ? (_modalSort.dir === 'asc' ? '▲' : '▼') : '⇅';
+    const numCls   = (i === 0 && isSql) ? 'modal-th-num' : '';
+    return `<th class="${sortCls} ${numCls}" onclick="onModalSort(${i})" title="${escapeHtmlAttr(h)}">
+      ${escapeHtml(h)}<span class="sort-icon">${icon}</span>
+    </th>`;
+  }).join('');
+
+  let tbodyHtml;
+  if (!rows.length) {
+    tbodyHtml = `<tr><td colspan="${cols.length}" class="modal-no-results">
+      <span>🔍</span>ไม่พบข้อมูลที่ตรงกับ "${_modalFilter}"
+    </td></tr>`;
+  } else {
+    tbodyHtml = rows.map((r, ri) =>
+      `<tr>
+        ${cols.map((h, ci) => {
+          const cls = (ci === 0 && isSql) ? 'modal-td-num' : '';
+          return `<td class="${cls}" title="${escapeHtmlAttr(String(r[h] ?? ''))}">${hlCell(r[h])}</td>`;
+        }).join('')}
+      </tr>`
+    ).join('');
+  }
+
+  const body = document.getElementById('tableModalBody');
+  if (!body) return;
+  body.innerHTML = `
+    <table class="modal-preview-table">
+      <thead><tr>${theadHtml}</tr></thead>
+      <tbody>${tbodyHtml}</tbody>
+    </table>`;
+}
+
+// Close modal on Esc
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && _modalKey) closeTableModal();
+});
+
+// ═══════════════════════════════════════════════════════════
+//  UI HELPERS
+// ═══════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+//  DUPLICATE DETECTION
+// ═══════════════════════════════════════════════════════════
+
+// คำนวณ hash แบบเร็ว (FNV-1a 32-bit) สำหรับเปรียบเทียบเนื้อหา
+function _fnv32(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return h.toString(16);
+}
+
+// อ่านไฟล์เป็น text (สำหรับ SQL และ CSV)
+function _readAsText(file) {
+  return new Promise(resolve => {
+    const r = new FileReader();
+    r.onload = e => resolve(e.target.result || '');
+    r.onerror = () => resolve('');
+    r.readAsText(file, 'utf-8');
+  });
+}
+
+// ตรวจ duplicate ก่อน process — คืน array ของ issues ที่พบ
+async function detectDuplicates(files) {
+  const issues   = [];
+  const nameSet  = new Map();   // name → index
+  const hashSet  = new Map();   // hash → filename
+  const tableSet = new Map();   // tableName → filename (SQL only)
+
+  for (const file of files) {
+    const nameLower = file.name.toLowerCase();
+
+    // 1. ชื่อไฟล์ซ้ำ
+    if (nameSet.has(nameLower)) {
+      issues.push({
+        type  : 'filename',
+        label : '📄 ชื่อไฟล์ซ้ำ',
+        detail: `"${file.name}" ซ้ำกับไฟล์ที่อัปโหลด`,
+        files : [nameSet.get(nameLower), file.name],
+      });
+    } else {
+      nameSet.set(nameLower, file.name);
+    }
+
+    // 2. เนื้อหาไฟล์ซ้ำ (hash) — ตรวจเฉพาะ SQL และ CSV
+    const ext = file.name.split('.').pop().toLowerCase();
+    if (ext === 'sql' || ext === 'csv') {
+      const text = await _readAsText(file);
+      const hash = _fnv32(text.replace(/\s+/g, ' ').trim());  // normalize whitespace
+      if (hashSet.has(hash)) {
+        issues.push({
+          type  : 'content',
+          label : '🔁 เนื้อหาเหมือนกัน',
+          detail: `"${file.name}" มีเนื้อหาเหมือนกับ "${hashSet.get(hash)}" ทุกประการ`,
+          files : [hashSet.get(hash), file.name],
+        });
+      } else {
+        hashSet.set(hash, file.name);
+      }
+
+      // 3. Table name ซ้ำข้ามไฟล์ SQL
+      if (ext === 'sql') {
+        const tableMatches = [...text.matchAll(
+          /create\s+table\s+(?:if\s+not\s+exists\s+)?([a-zA-Z0-9_."`\[\]]+)\s*\(/gi
+        )];
+        for (const m of tableMatches) {
+          const tname = m[1].replace(/["`\[\]]/g, '').split('.').pop().toLowerCase();
+          if (tableSet.has(tname)) {
+            issues.push({
+              type  : 'table',
+              label : '🗃️ Table ซ้ำข้ามไฟล์',
+              detail: `Table "${tname}" พบทั้งใน "${tableSet.get(tname)}" และ "${file.name}"`,
+              files : [tableSet.get(tname), file.name],
+            });
+          } else {
+            tableSet.set(tname, file.name);
+          }
+        }
+      }
+    }
+  }
+
+  return issues;
+}
+
+// แสดง modal ให้ผู้ใช้ verify — คืน Promise<'proceed'|'cancel'>
+function showDuplicateModal(issues, files) {
+  return new Promise(resolve => {
+    document.getElementById('dupModalOverlay')?.remove();
+
+    const rows = issues.map(iss => `
+      <tr>
+        <td><span class="dup-type-badge">${iss.label}</span></td>
+        <td class="dup-detail">${iss.detail}</td>
+      </tr>`).join('');
+
+    const overlay = document.createElement('div');
+    overlay.id        = 'dupModalOverlay';
+    overlay.className = 'dup-modal-overlay';
+    overlay.innerHTML = `
+      <div class="dup-modal">
+        <div class="dup-modal-icon">⚠️</div>
+        <div class="dup-modal-title">พบข้อมูลที่อาจซ้ำกัน — กรุณา Verify ก่อนดำเนินการ</div>
+        <div class="dup-modal-sub">
+          ตรวจพบ <strong>${issues.length}</strong> รายการที่ต้องระวัง
+          จากไฟล์ที่อัปโหลดทั้งหมด <strong>${files.length}</strong> ไฟล์
+        </div>
+        <table class="dup-table">
+          <thead><tr><th>ประเภท</th><th>รายละเอียด</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <div class="dup-modal-hint">
+          หากแน่ใจว่าต้องการดำเนินการต่อ คลิก <b>ดำเนินการต่อ</b>
+          หรือ <b>ยกเลิก</b> เพื่อเลือกไฟล์ใหม่
+        </div>
+        <div class="dup-modal-actions">
+          <button class="dup-btn-cancel"   id="dupBtnCancel">✕ ยกเลิก</button>
+          <button class="dup-btn-proceed"  id="dupBtnProceed">✓ ดำเนินการต่อ</button>
+        </div>
+      </div>`;
+
+    document.body.appendChild(overlay);
+
+    document.getElementById('dupBtnProceed').onclick = () => {
+      overlay.remove();
+      resolve('proceed');
+    };
+    document.getElementById('dupBtnCancel').onclick = () => {
+      overlay.remove();
+      resolve('cancel');
+    };
+  });
+}
+
+
+function renderFileChip(name, type) {
+  const div = document.createElement('div');
+  div.className = 'file-item';
+  div.innerHTML = `
+    <span class="file-type-badge ${type}">${type.toUpperCase()}</span>
+    <span class="file-name" title="${name}">${name}</span>
+    <button class="file-remove" onclick="this.parentElement.remove()">✕</button>`;
+  document.getElementById('fileList').appendChild(div);
+}
+
+function clearUI() {
+  document.getElementById('tablesGrid').innerHTML = `
+    <div class="empty-state">
+      <div class="empty-state-icon">🗄️</div>
+      <div class="empty-state-text">อัปโหลดไฟล์ CSV, Excel หรือ SQL เพื่อเริ่มต้น</div>
+    </div>`;
+  document.getElementById('bulkSection').classList.remove('visible');
+  const _tb = document.getElementById('typeTableBody');
+  if (_tb) _tb.innerHTML = '<tr><td colspan="3"><div class="empty-hint">No file loaded</div></td></tr>';
+  const card = document.getElementById('sessionCard');
+  if (card) card.style.display = 'none';
+  document.getElementById('unknownWarnings')?.remove();
+  document.getElementById('byteAnomalyWarnings')?.remove();
+  document.getElementById('fkErrorPanel')?.remove();
+  document.getElementById('contentDupWarnings')?.remove();
+  updateStats(0,0,0);
+  updateBadges(0,0,'ready');
+}
+
+function updateStats(files, tables, rows) {
+  document.getElementById('statFiles').textContent  = files;
+  document.getElementById('statTables').textContent = tables;
+  document.getElementById('statRows').textContent   = rows.toLocaleString();
+}
+
+function updateBadges(tables, rows, status) {
+  document.getElementById('badgeTables').textContent = tables+' tables';
+  document.getElementById('badgeRows').textContent   = rows.toLocaleString()+' rows';
+  const b = document.getElementById('badgeStatus');
+  b.textContent = status;
+  b.className   = 'badge' + ({mapped:' converted', loaded:' active'}[status] || '');
+}
+
+function showStatus(id, type, msg) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = msg;
+  el.className   = 'status-bar '+type+' show';
+  if (type === 'success') setTimeout(() => el.classList.remove('show'), 4000);
+}
+
+function setLoading(on) {
+  document.getElementById('loadingBar').classList.toggle('active', on);
+}
+
+// ── Health check ──────────────────────────────────────────
+async function checkHealth() {
+  try {
+    const res = await fetchWithApiFallback('/health');
+    const payload = await res.json();
+    setBackendStatus(res.ok && String(payload.status || '').toLowerCase() === 'ok');
+  } catch { setBackendStatus(false); }
+}
+
+function setBackendStatus(ok) {
+  const dot = document.getElementById('backendDot');
+  const lbl = document.getElementById('backendLabel');
+  if (!dot||!lbl) return;
+  dot.className   = 'status-dot '+(ok?'online':'offline');
+  lbl.textContent = ok ? 'API Online' : 'API Offline';
+}
+
+// ─── Theme Toggle ─────────────────────────────────────────
+function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('theme', theme);
+  document.getElementById('btnDark').classList.toggle('active',  theme === 'dark');
+  document.getElementById('btnLight').classList.toggle('active', theme === 'light');
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeHtmlAttr(value) {
+  return escapeHtml(value).replace(/`/g, '&#96;');
+}
+
+function setSelectOptions(selectEl, placeholder, values) {
+  if (!selectEl) return;
+  const current = selectEl.value;
+  selectEl.innerHTML = `<option value="">${placeholder}</option>` +
+    values.map(v => `<option value="${v}">${v}</option>`).join('');
+  selectEl.value = values.includes(current) ? current : '';
+}
+
+function filterDestOptionsForSource(sourceDb) {
+  const allDbs = Array.isArray(window._allDbs) ? window._allDbs : [];
+  const dstSel = document.getElementById('destDbSelect');
+  if (!allDbs.length || !dstSel) return;
+
+  // แสดงทุก DB เสมอ รวมตัวเองด้วย (อนุญาต src=dst)
+  setSelectOptions(dstSel, '-- Select Destination --', allDbs);
+  onDestDbChange();
+}
+
+// ── Load DB pairs from backend ────────────────────────────
+async function loadDbPairs() {
+  try {
+    const res = await fetchWithApiFallback('/db-pairs');
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.pairs || !data.pairs.length) return;
+
+    window._dbPairs = data.pairs;
+
+    // source = DB ที่มีเป็น source_db ใน pairs
+    const sources = [...new Set(data.pairs.map(p => p.source_db).filter(Boolean))];
+    // allDbs = ทุก DB ที่รู้จักทั้ง source และ dest รวม src=dst ได้
+    window._allDbs = [...new Set(data.pairs.flatMap(p => [p.source_db, p.dest_db]).filter(Boolean))];
+
+    const srcSel = document.getElementById('sourceDbSelect');
+    setSelectOptions(srcSel, '-- Select Source --', sources);
+    filterDestOptionsForSource(srcSel.value);
+    onSourceDbChange();
+  } catch {
+    // ถ้า backend ไม่มี endpoint นี้ ให้ใช้ hardcode เดิม (ไม่ทำอะไร)
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  setTheme(localStorage.getItem('theme') || 'dark');
+  checkHealth();
+  loadDbPairs();
+  setInterval(checkHealth, 30_000);
+});
+
+// ── Download Confluent XLSX (via backend) ─────────────────
+async function downloadAllXLSX() { showTableSelectorModal('xlsx'); }
+
+async function downloadTableXLSX(tableName) {
+  const t = currentData[tableName];
+  if (!t?.backendCols) {
+    showStatus('convertStatus', 'error', '❌ ไม่มีข้อมูล SQL สำหรับตารางนี้');
+    return;
+  }
+
+  setLoading(true);
+  try {
+    const res = await fetchWithApiFallback(`/export/${sessionId}/xlsx/${tableName}`);
+    if (!res.ok) throw new Error((await res.json().catch(()=>({}))).detail || res.statusText);
+
+    const blob = await res.blob();
+    triggerDownload(blob, makeExportFilename([tableName], 'xlsx'));
+    showStatus('convertStatus', 'success', `✓ ดาวน์โหลด ${tableName}_confluent.xlsx สำเร็จ`);
+  } catch (err) {
+    showStatus('convertStatus', 'error', '❌ ' + err.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  TABLE SELECTOR MODAL — เลือก table ก่อน export
+// ═══════════════════════════════════════════════════════════
+function showTableSelectorModal(fmt) {
+  const allKeys = Object.keys(currentData).filter(k => currentData[k].backendCols);
+  if (!allKeys.length) {
+    showStatus('convertStatus', 'error', '❌ ไม่มีข้อมูล SQL — กรุณาอัปโหลดไฟล์ SQL ก่อน');
+    return;
+  }
+
+  document.getElementById('tblSelOverlay')?.remove();
+
+  let active  = [...allKeys];
+  let removed = [];
+
+  function render(overlay) {
+    const grid    = overlay.querySelector('.tsel-chip-grid');
+    const rgrid   = overlay.querySelector('.tsel-removed-grid');
+    const rlabel  = overlay.querySelector('.tsel-removed-label');
+    const counter = overlay.querySelector('.tsel-counter');
+    const btnExp  = overlay.querySelector('.tsel-btn-export');
+
+    grid.innerHTML = active.length === 0
+      ? '<span class="tsel-empty">ไม่มี table ที่เลือก</span>'
+      : active.map(k => {
+          const isDup = currentData[k]?.isDuplicate;
+          return `<div class="tsel-chip${isDup ? ' is-dup' : ''}">
+            ${isDup ? '<span class="tsel-dup-badge">DUP</span>' : ''}
+            <span class="tsel-chip-name">${k}</span>
+            <button class="tsel-chip-remove" data-key="${k}">✕</button>
+          </div>`;
+        }).join('');
+
+    rgrid.innerHTML = removed.map(k =>
+      `<div class="tsel-removed-chip">
+        <span>${k}</span>
+        <button class="tsel-restore-btn" data-key="${k}">↩</button>
+      </div>`
+    ).join('');
+    rlabel.style.display = removed.length ? '' : 'none';
+    counter.textContent  = `เลือก ${active.length} / ${allKeys.length} tables`;
+    btnExp.disabled      = active.length === 0;
+
+    grid.querySelectorAll('.tsel-chip-remove').forEach(btn => {
+      btn.onclick = () => {
+        const k = btn.dataset.key;
+        active = active.filter(x => x !== k);
+        removed = [k, ...removed];
+        render(overlay);
+      };
+    });
+    rgrid.querySelectorAll('.tsel-restore-btn').forEach(btn => {
+      btn.onclick = () => {
+        const k = btn.dataset.key;
+        removed = removed.filter(x => x !== k);
+        active = allKeys.filter(x => x === k || active.includes(x));
+        render(overlay);
+      };
+    });
+  }
+
+  const overlay = document.createElement('div');
+  overlay.id        = 'tblSelOverlay';
+  overlay.className = 'tsel-overlay';
+  overlay.innerHTML = `
+    <div class="tsel-modal">
+      <div class="tsel-modal-header">
+        <div>
+          <div class="tsel-modal-title">เลือก Table ที่ต้องการ Export</div>
+          <div class="tsel-counter"></div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="tsel-btn-all" id="tselBtnAll">Restore ทั้งหมด</button>
+          <button class="tsel-btn-all" id="tselBtnNone">ลบทั้งหมด</button>
+        </div>
+      </div>
+      <div class="tsel-chip-grid"></div>
+      <div class="tsel-removed-label" style="display:none">ถูกนำออก</div>
+      <div class="tsel-removed-grid"></div>
+      <div class="tsel-modal-footer">
+        <button class="tsel-btn-cancel">ยกเลิก</button>
+        <button class="tsel-btn-export">Export ${fmt.toUpperCase()}</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(overlay);
+  render(overlay);
+
+  overlay.querySelector('#tselBtnAll').onclick  = () => { active = [...allKeys]; removed = []; render(overlay); };
+  overlay.querySelector('#tselBtnNone').onclick = () => { removed = [...allKeys]; active = []; render(overlay); };
+  overlay.querySelector('.tsel-btn-cancel').onclick  = () => overlay.remove();
+  overlay.querySelector('.tsel-btn-export').onclick  = () => { overlay.remove(); doExportSelected(fmt, active); };
+}
+
+async function doExportSelected(fmt, selectedKeys) {
+  if (!selectedKeys.length) return;
+  const qs  = selectedKeys.map(k => `tables=${encodeURIComponent(k)}`).join('&');
+  const url = `${API_BASE}/export/${sessionId}/${fmt}?${qs}`;
+  setLoading(true);
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+    triggerDownload(await res.blob(), makeExportFilename(selectedKeys, fmt));
+    showStatus('convertStatus', 'success', `✓ Export ${fmt.toUpperCase()} สำเร็จ (${selectedKeys.length} tables)`);
+  } catch (err) {
+    showStatus('convertStatus', 'error', '❌ ' + err.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  buildPillsHTML — สร้าง pill ให้แต่ละ column ใน backend-cols
+// ═══════════════════════════════════════════════════════════
+function buildPillsHTML(backendCols) {
+  if (!backendCols || !backendCols.length) {
+    return '<span class="bcol-empty-hint">ไม่มีคอลัมน์</span>';
+  }
+
+  const importantCols = backendCols.filter(c =>
+    c.is_pk || c.fk || c.isUnknown || c.isByteAnomaly || c.fkError
+  );
+
+  if (!importantCols.length) {
+    return '<span class="bcol-empty-hint">No PK, FK, or errors</span>';
+  }
+
+  const MAX_PILLS = 12;
+  const visible   = importantCols.slice(0, MAX_PILLS);
+  const more      = importantCols.length - MAX_PILLS;
+
+  const pillsHtml = visible.map(c => {
+    const hasError = c.isUnknown || c.isByteAnomaly || c.fkError;
+    const classes = [
+      'bcol-pill',
+      hasError        ? 'has-error'    : '',
+      c.isUnknown     ? 'unknown'      : '',
+      c.isByteAnomaly ? 'byte-anomaly' : '',
+    ].filter(Boolean).join(' ');
+
+    const pkTag  = c.is_pk ? '<span class="pill-tag pill-tag-PK">PK</span>' : '';
+    const fkTitle = c.fk ? `FK -> ${formatFkRef(c.fk)}` : '';
+    const fkTag  = c.fk
+      ? `<span class="pill-tag pill-tag-FK" title="${fkTitle}">FK</span>`
+      : '';
+    const errTag = hasError ? '<span class="pill-tag pill-tag-ERR">ERR</span>' : '';
+    const anomBadge = c.isByteAnomaly
+      ? '<span class="anomaly-pill-badge">⚠</span>'
+      : '';
+
+    const typeLabel = c.final_type || c.source_sql_type || '?';
+    const errorText = [
+      c.isUnknown ? 'Unknown type' : '',
+      c.isByteAnomaly ? 'Byte anomaly' : '',
+      c.fkError ? (c.fkError.error || c.fkError.msg || 'FK error') : '',
+    ].filter(Boolean).join(' | ');
+    const title = [
+      `${c.column_name} : ${c.source_sql_type || ''} -> ${typeLabel}`,
+      fkTitle,
+      errorText,
+    ].filter(Boolean).join(' | ');
+
+    return `<span class="${classes}" title="${c.column_name} : ${c.source_sql_type || ''} → ${typeLabel}">
+      ${pkTag}${fkTag}${errTag}
+      <em>${c.column_name}</em>
+      <span style="color:var(--text3);margin-left:3px">${typeLabel}</span>
+      ${anomBadge}
+    </span>`;
+  }).join('');
+
+  const morePill = more > 0
+    ? `<span class="bcol-more">+${more} more…</span>`
+    : '';
+
+  return pillsHtml + morePill;
+}
+
+function formatFkRef(fk) {
+  if (!fk) return '';
+  if (typeof fk === 'string') return fk;
+  return `${fk.ref_table || '?'}${fk.ref_column ? '.' + fk.ref_column : ''}`;
+}
+
+
+// ═══════════════════════════════════════════════════════════
+//  renderFKErrors — แสดง FK validation errors
+// ═══════════════════════════════════════════════════════════
+function renderFKErrors(fkErrors) {
+  document.getElementById('fkErrorPanel')?.remove();
+  if (!fkErrors || !fkErrors.length) return;
+
+  const items = fkErrors.map(e => {
+    const isErr = (e.level || 'error') === 'error';
+    const icon  = isErr ? '❌' : '⚠️';
+    return `<li class="fk-err-item ${e.level}">
+      <span class="fk-err-icon">${icon}</span>
+      <span><b>${e.src}</b> — ${e.msg}</span>
+    </li>`;
+  });
+
+  const div = document.createElement('div');
+  div.id        = 'fkErrorPanel';
+  div.className = 'warn-panel fk-panel';
+  div.innerHTML = `
+    <div class="warn-panel-header">
+      🔗 FK Validation (${fkErrors.length} รายการ)
+      <button onclick="this.parentElement.parentElement.remove()">✕</button>
+    </div>
+    <ul style="list-style:none;display:flex;flex-direction:column;gap:4px">
+      ${items.join('')}
+    </ul>`;
+  document.getElementById('tablesGrid').insertAdjacentElement('beforebegin', div);
+}
+
+
+window.addEventListener('beforeunload', () => {
+  if (sessionId) fetch(`${API_BASE}/session/${sessionId}`, { method: 'DELETE', keepalive: true });
+});

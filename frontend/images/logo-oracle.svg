@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 156 40" role="img" aria-label="Oracle">
+  <rect width="156" height="40" rx="10" fill="none"/>
+  <g transform="translate(8 9)">
+    <rect x="0" y="2" width="28" height="18" rx="9" fill="none" stroke="#f80000" stroke-width="4"/>
+  </g>
+  <text x="42" y="26" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="700" letter-spacing=".8" fill="#f80000">ORACLE</text>
+</svg>
