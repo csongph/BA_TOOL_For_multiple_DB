@@ -6,7 +6,7 @@ CREATE TABLE hrEmployee (
     Department   nvarchar(100) NULL,
     Position     nvarchar(100) NULL,
     HireDate     date          NULL,
-    IsActive     tinyint       NOT NULL DEFAULT 1,
+    IsActive     bit           NOT NULL DEFAULT 1,
 
     PRIMARY KEY (EmployeeID)
 );
@@ -19,7 +19,7 @@ CREATE TABLE hrPayroll_Details (
     SocialSecurityFund     decimal(18, 4)    NULL,
     OT_Rate                float             NULL,
     PaymentMethod          int               NOT NULL,
-    IsTaxExempt            tinyint           DEFAULT 0,
+    IsTaxExempt            bit          DEFAULT 0,
     LastPaymentTimestamp   datetimeoffset(7) NULL,
     PayrollNote            ntext             COLLATE Thai_CI_AS NULL,
 

@@ -21,6 +21,8 @@ _C = {
     "logical_bg": "FFFFC0",
     "row_odd": "FFFFFF",
     "row_even": "F2F2F2",
+    "gap_bg": "ECECEC",    # separator column fill
+    "key_bg": "D9E1F2",    # summary key column fill
     # byte-anomaly warning colours
     "warn_bg": "FFE7EC",   # light red fill
     "warn_fg": "C0002A",   # dark red text
@@ -29,6 +31,13 @@ _C = {
     "warn_border": "FF4D6D",
     "dup_bg": "FFC7CE",   # duplicate table highlight
 }
+
+# Row heights
+_H_TOPIC  = 22   # TABLE / Topic header
+_H_SECTION = 20  # "New [DB]" / "Content [AVRO]" / "Detail Section"
+_H_COL_HDR = 22  # column header row
+_H_DATA    = 18  # data rows
+_H_GAP     = 6   # blank gap between tables
 
 # Single-table layout: Raw (cols 1-8) | Gap (cols 9-10) | AVRO (cols 11-18) | Gap (cols 19-21) | FINAL (cols 22-28)
 _RAW_END = 8
@@ -65,6 +74,14 @@ def _sw(ws, row, col, value, bold=False, align_h="left", wrap=True):
     c.alignment = Alignment(horizontal=align_h, vertical="center", wrap_text=wrap)
     c.border = _WARN_BORDER
     return c
+
+
+def _paint_gap_cols(ws, row: int, col_list: list):
+    """Fill separator/gap columns with a neutral grey so they visually separate sections."""
+    for c in col_list:
+        cell = ws.cell(row=row, column=c)
+        cell.fill = PatternFill("solid", start_color=_C["gap_bg"])
+        cell.border = Border()   # no border on gap cols
 
 
 def _merge(ws, row, c1, c2):
@@ -159,17 +176,20 @@ def _write_raw_section(ws, table_name: str, columns: list,
     _merge(ws, start_row, c1, c2)
     _s(ws, start_row, c1, f"TABLE:    {table_name}" + (" [DUPLICATED]" if is_dup else ""),
        bg=_C["dup_bg"] if is_dup else _C["topic_bg"], bold=True, align_h="left")
+    ws.row_dimensions[start_row].height = _H_TOPIC
     start_row += 1
 
     db_label = _DB_LABEL.get((source_db or "").lower().strip(), source_db or "SQL Server")
     _merge(ws, start_row, c1, c2)
     _s(ws, start_row, c1, f"New [{db_label}]",
        bg=_C["raw_bg"], bold=True, align_h="left")
+    ws.row_dimensions[start_row].height = _H_SECTION
     start_row += 1
 
     _merge(ws, start_row, c1, c2)
     _s(ws, start_row, c1, "Detail Section",
        bg=_C["detail_bg"], bold=True, align_h="left")
+    ws.row_dimensions[start_row].height = _H_SECTION
     start_row += 1
 
     for ci, h in enumerate(
@@ -178,6 +198,7 @@ def _write_raw_section(ws, table_name: str, columns: list,
     ):
         _s(ws, start_row, c1 + ci - 1, h,
            bg=_C["col_hdr_bg"], fg=_C["col_hdr_fg"], bold=True)
+    ws.row_dimensions[start_row].height = _H_COL_HDR
     start_row += 1
 
     for i, col in enumerate(columns, 1):
@@ -199,6 +220,7 @@ def _write_raw_section(ws, table_name: str, columns: list,
         _s(ws, r, c1+5, col.get("nullable", ""),    bg=bg)
         _s(ws, r, c1+6, "",                         bg=bg, align_h="left", wrap=True)
         _s(ws, r, c1+7, "",                         bg=bg, align_h="left", wrap=True)
+        ws.row_dimensions[r].height = _H_DATA
         start_row += 1
 
     return start_row
@@ -216,16 +238,19 @@ def _write_avro_section(ws, table_name: str, columns: list,
     _s(ws, start_row, c1,
        f"Topic:    {table_name}" + (" [DUPLICATED]" if is_dup else ""),
        bg=_C["dup_bg"] if is_dup else _C["topic_bg"], bold=True, align_h="left")
+    ws.row_dimensions[start_row].height = _H_TOPIC
     start_row += 1
 
     _merge(ws, start_row, c1, c2)
     _s(ws, start_row, c1, "Content [AVRO]",
        bg=_C["avro_bg"], bold=True, align_h="left")
+    ws.row_dimensions[start_row].height = _H_SECTION
     start_row += 1
 
     _merge(ws, start_row, c1, c2)
     _s(ws, start_row, c1, "Detail Section",
        bg=_C["detail_bg"], bold=True, align_h="left")
+    ws.row_dimensions[start_row].height = _H_SECTION
     start_row += 1
 
     for ci, h in enumerate(
@@ -235,6 +260,7 @@ def _write_avro_section(ws, table_name: str, columns: list,
     ):
         _s(ws, start_row, c1 + ci - 1, h,
            bg=_C["col_hdr_bg"], fg=_C["col_hdr_fg"], bold=True)
+    ws.row_dimensions[start_row].height = _H_COL_HDR
     start_row += 1
 
     for i, col in enumerate(columns, 1):
@@ -250,6 +276,7 @@ def _write_avro_section(ws, table_name: str, columns: list,
         _s(ws, r, c1+5, "Direct move",                  bg=bg)
         _s(ws, r, c1+6, "",                             bg=bg, align_h="left", wrap=True)
         _s(ws, r, c1+7, "",                             bg=bg, align_h="left", wrap=True)
+        ws.row_dimensions[r].height = _H_DATA
         start_row += 1
 
     return start_row
@@ -271,25 +298,29 @@ def _write_final_section(ws, table_name: str, columns: list,
     _s(ws, start_row, c1,
        f"Topic:    {table_name}" + (" [DUPLICATED]" if is_dup else ""),
        bg=_C["dup_bg"] if is_dup else _C["topic_bg"], bold=True, align_h="left")
+    ws.row_dimensions[start_row].height = _H_TOPIC
     start_row += 1
 
     _merge(ws, start_row, c1, c2)
     _s(ws, start_row, c1, final_header,
        bg=_C["avro_bg"], bold=True, align_h="left")
+    ws.row_dimensions[start_row].height = _H_SECTION
     start_row += 1
 
     _merge(ws, start_row, c1, c2)
     _s(ws, start_row, c1, "Detail Section",
        bg=_C["detail_bg"], bold=True, align_h="left")
+    ws.row_dimensions[start_row].height = _H_SECTION
     start_row += 1
 
     for ci, h in enumerate(
         ["NO.", "Name", "Partition Key",
-         "Standard Format Type", "Fianl Format Type",
+         "Standard Format Type", "Final Format Type",
          "Description", "Possible Value"], 1
     ):
         _s(ws, start_row, c1 + ci - 1, h,
            bg=_C["col_hdr_bg"], fg=_C["col_hdr_fg"], bold=True)
+    ws.row_dimensions[start_row].height = _H_COL_HDR
     start_row += 1
 
     for i, col in enumerate(columns, 1):
@@ -304,6 +335,7 @@ def _write_final_section(ws, table_name: str, columns: list,
         _s(ws, r, c1+4, col.get("final_type", ""),          bg=bg)
         _s(ws, r, c1+5, "",                                 bg=bg, align_h="left", wrap=True)
         _s(ws, r, c1+6, "",                                 bg=bg, align_h="left", wrap=True)
+        ws.row_dimensions[r].height = _H_DATA
         start_row += 1
 
     return start_row
@@ -322,16 +354,36 @@ def _unique_sheet_title(wb, base: str) -> str:
     return base  # fallback (should never reach here)
 
 
+def _autofit(ws, min_width: int = 8, max_width: int = 60,
+             padding: float = 2.0, gap_cols: set = None):
+    """
+    Auto-fit every column width to its widest cell content.
+    gap_cols = set of 1-based column indices kept narrow (separator columns).
+    """
+    col_widths = {}
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.value is None:
+                continue
+            col = cell.column
+            bold_factor = 1.1 if (cell.font and cell.font.bold) else 1.0
+            estimated = len(str(cell.value)) * bold_factor
+            if col not in col_widths or estimated > col_widths[col]:
+                col_widths[col] = estimated
+    for col, width in col_widths.items():
+        letter = get_column_letter(col)
+        if gap_cols and col in gap_cols:
+            ws.column_dimensions[letter].width = 3
+        else:
+            ws.column_dimensions[letter].width = max(min_width, min(max_width, width + padding))
+
+
 def _set_comparison_widths(ws):
-    widths = [18, 22, 20, 16, 16, 18, 18, 12, 8, 20, 20, 16]
-    for i, w in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
+    _autofit(ws, min_width=8, max_width=50)
 
 
 def _set_summary_widths(ws):
-    widths = [20, 50]
-    for i, w in enumerate(widths, 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
+    _autofit(ws, min_width=15, max_width=60)
 
 
 def _build_type_comparison_sheet(ws, tables: dict,
@@ -362,8 +414,10 @@ def _build_type_comparison_sheet(ws, tables: dict,
     ]
     for ci, h in enumerate(headers, 1):
         _s(ws, row, ci, h, bg=_C["col_hdr_bg"], fg=_C["col_hdr_fg"], bold=True)
+    ws.row_dimensions[row].height = _H_COL_HDR
     row += 1
 
+    row_num = 0
     for table_name, columns in tables.items():
         for col in columns:
             sql_type = col.get("source_sql_type", "")
@@ -377,20 +431,24 @@ def _build_type_comparison_sheet(ws, tables: dict,
                 else:
                     length = parts[0].strip()
 
-            _s(ws, row, 1,  table_name,                          align_h="left")
-            _s(ws, row, 2,  col.get("column_name", ""),          align_h="left")
-            _s(ws, row, 3,  sql_type)
-            _s(ws, row, 4,  col.get("raw_type", ""))
-            _s(ws, row, 5,  col.get("logical_type", ""))
-            _s(ws, row, 6,  col.get("standard_type", ""))
-            _s(ws, row, 7,  col.get("final_type", ""))
-            _s(ws, row, 8,  col.get("nullable", ""))
-            _s(ws, row, 9,  "Y" if col.get("is_pk") else "N")
-            _s(ws, row, 10, length)
-            _s(ws, row, 11, precision)
-            _s(ws, row, 12, scale)
+            bg = _C["row_odd"] if row_num % 2 == 0 else _C["row_even"]
+            _s(ws, row, 1,  table_name,                          align_h="left",  bg=bg)
+            _s(ws, row, 2,  col.get("column_name", ""),          align_h="left",  bg=bg)
+            _s(ws, row, 3,  sql_type,                                             bg=bg)
+            _s(ws, row, 4,  col.get("raw_type", ""),                              bg=bg)
+            _s(ws, row, 5,  col.get("logical_type", ""),                          bg=bg)
+            _s(ws, row, 6,  col.get("standard_type", ""),                         bg=bg)
+            _s(ws, row, 7,  col.get("final_type", ""),                            bg=bg)
+            _s(ws, row, 8,  col.get("nullable", ""),                              bg=bg)
+            _s(ws, row, 9,  "Y" if col.get("is_pk") else "N",                    bg=_C["pk_bg"] if col.get("is_pk") else bg)
+            _s(ws, row, 10, length,                                               bg=bg)
+            _s(ws, row, 11, precision,                                            bg=bg)
+            _s(ws, row, 12, scale,                                                bg=bg)
+            ws.row_dimensions[row].height = _H_DATA
             row += 1
+            row_num += 1
 
+    ws.freeze_panes = ws.cell(row=2, column=1)
     _set_comparison_widths(ws)
 
 
@@ -419,8 +477,9 @@ def _build_summary_sheet(ws, tables: dict,
     ]
 
     for key, value in summary_rows:
-        _s(ws, row, 1, key, bold=True, align_h="left")
+        _s(ws, row, 1, key, bold=True, align_h="left", bg=_C["key_bg"])
         _s(ws, row, 2, value, align_h="left")
+        ws.row_dimensions[row].height = _H_DATA
         row += 1
 
     _set_summary_widths(ws)
@@ -440,30 +499,12 @@ def _build_sheet(ws, table_name: str, columns: list, anomalies: list | None = No
         _write_warning_section(ws, tagged, start_row=end_row, c2=_FINAL_END)
 
 def _set_col_widths(ws, col_offsets=None):
-    if col_offsets is None:
-        col_offsets = [1]
-
-    raw_widths  = [8, 22, 14, 12, 16, 12, 40, 40]
-    avro_widths = [8, 22, 12, 16, 18, 18, 40, 40]  # 8 cols
-    final_widths = [8, 22, 12, 20, 20, 40, 40]      # 7 cols
-    gap_w = 4
-
-    for base in col_offsets:
-        for i, w in enumerate(raw_widths):
-            ws.column_dimensions[get_column_letter(base + i)].width = w
-        # Inner gap (base+8, base+9)
-        ws.column_dimensions[get_column_letter(base + 8)].width = gap_w
-        ws.column_dimensions[get_column_letter(base + 9)].width = gap_w
-        # AVRO cols (base+10 .. base+17) — 8 cols
-        for i, w in enumerate(avro_widths):
-            ws.column_dimensions[get_column_letter(base + 10 + i)].width = w
-        # gap between AVRO and FINAL (base+18, base+19, base+20)
-        ws.column_dimensions[get_column_letter(base + 18)].width = gap_w
-        ws.column_dimensions[get_column_letter(base + 19)].width = gap_w
-        ws.column_dimensions[get_column_letter(base + 20)].width = gap_w
-        # FINAL cols (base+21 .. base+27) — 7 cols
-        for i, w in enumerate(final_widths):
-            ws.column_dimensions[get_column_letter(base + 21 + i)].width = w
+    # Gap columns (separator between sections) — kept narrow
+    gap_cols = set()
+    for base in (col_offsets or [1]):
+        gap_cols.update([base + 8, base + 9,           # gap between Raw and AVRO
+                         base + 18, base + 19, base + 20])  # gap between AVRO and FINAL
+    _autofit(ws, min_width=8, max_width=60, padding=2.0, gap_cols=gap_cols)
 
 
 def _build_multi_sheet(ws, tables: dict, byte_anomalies: dict | None = None,
@@ -492,7 +533,17 @@ def _build_multi_sheet(ws, tables: dict, byte_anomalies: dict | None = None,
         final_end = _write_final_section(ws, table_name, columns,
                                          start_row=current_row, start_col=_FINAL_START,
                                          dest_db=dest_db, is_dup=_is_dup)
-        current_row = max(raw_end, avro_end, final_end) + 2   # 2-row gap ระหว่างตาราง
+        next_row = max(raw_end, avro_end, final_end)
+
+        # Paint gap columns grey for every row of this block
+        gap_cols = [9, 10, 19, 20, 21]
+        for r in range(current_row, next_row):
+            _paint_gap_cols(ws, r, gap_cols)
+
+        # blank gap rows between tables
+        for r in range(next_row, next_row + 2):
+            ws.row_dimensions[r].height = _H_GAP
+        current_row = next_row + 2
 
         for a in (byte_anomalies or {}).get(table_name) or []:
             if isinstance(a, dict):
@@ -502,6 +553,7 @@ def _build_multi_sheet(ws, tables: dict, byte_anomalies: dict | None = None,
         _write_warning_section(ws, all_anomalies,
                                start_row=current_row - 1, c2=_FINAL_END)
 
+    ws.freeze_panes = ws.cell(row=5, column=1)   # freeze past the 3 header rows + col header
     _set_col_widths(ws, col_offsets=[1])
 
 
