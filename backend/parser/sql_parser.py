@@ -135,7 +135,6 @@ def parse_sql(sql_text: str) -> list[dict]:
                 "fk":       fk_map.get(column_name),
             })
 
-    # [FIX-Bug] เปลี่ยน print → logger.debug (ไม่ spam production logs)
     logger.debug("parsed rows:")
     for t in tables:
         pk = " PK" if t["is_pk"] else ""
@@ -313,6 +312,4 @@ if __name__ == "__main__":
     if not errors:
         print("  OK — no issues")
     for e in errors:
-        # [BUG FIX] error dict ไม่มี key "level"/"src"/"msg"
-        # validate_fk() ใช้ keys: table, column, ref_table, ref_col, error
         print(f"  [ERR] {e['table']}.{e['column']} -> {e['ref_table']}.{e.get('ref_col') or '?'} - {e['error']}")

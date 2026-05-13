@@ -68,10 +68,10 @@ async def lifespan(app: FastAPI):
         logger.info("📡 Connecting to PostgreSQL database pool...")
         init_db_pool()
         
-        # อธิบายเหตุผล (Rationale) ของการเปลี่ยนแปลง (Bug Fix)
+        # อธิบายเหตุผล (Rationale) ของการเปลี่ยนแปลง 
         logger.info(
             "✅ Database pool initialized. "
-            "Note: Mapping loading deferred to request-time to optimize startup speed (Bug #3 fix)."
+            "Note: Mapping loading deferred to request-time to optimize startup speed ."
         )
         
     except Exception as e:
@@ -190,7 +190,7 @@ def _make_export_filename(table_names: list[str], ext: str) -> str:
 def _load_mapping(source_db: str | None, dest_db: str | None) -> dict:
     """
     โหลด mapping ตาม db pair พร้อม in-process TTL cache (5 นาที)
-    - Bug 3 Fix: โหลดจาก DB เสมอตาม source_db ที่ระบุ เพื่อป้องกันข้อมูลปนกัน
+    - โหลดจาก DB เสมอตาม source_db ที่ระบุ เพื่อป้องกันข้อมูลปนกัน
     """
     cache_key = (source_db, dest_db)
     cached = _mapping_cache.get(cache_key)
@@ -310,7 +310,6 @@ async def convert(
     if len(files) > MAX_FILES:
         raise HTTPException(400, f"Too many files (max {MAX_FILES})")
 
-    # Bug 3 Fix: โหลด mapping สดๆ ใน request นี้เลย
     active_mapping = _load_mapping(source_db, dest_db)
     
     logger.info(

@@ -41,8 +41,6 @@ class MappingRepository:
         conn = get_connection(self.db_name)
         try:
             with conn.cursor() as cur:
-                # [BUG FIX] query เดิมขาด raw_type และ logical_type
-                # ทำให้ _rows_to_dict ได้รับ None ทั้งสองฟิลด์ → converter แมพไม่ได้
                 query = """
                     SELECT
                         drm.source_type  AS sql_type,

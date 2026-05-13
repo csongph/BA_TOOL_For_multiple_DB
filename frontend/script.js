@@ -406,67 +406,6 @@ async function convertData() {
   }
 }
 
-// ═══════════════════════════════════════════════════════════
-//  OVERRIDE — POST /override/:id
-// ═══════════════════════════════════════════════════════════
-async function applyOverride(tableName, columnName, newType, selectEl) {
-  // อัปเดต local ก่อน
-  const t = currentData[tableName];
-  if (t?.backendCols) {
-    const col = t.backendCols.find(c => c.column_name === columnName);
-    if (col) col.final_type = newType;
-  }
-
-  if (!sessionId) {
-    flashSelect(selectEl, 'local');
-    reRenderCardPills(tableName);
-    return;
-  }
-
-  try {
-    const res = await fetchWithApiFallback(`/override/${sessionId}`, {
-      method : 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body   : JSON.stringify({ table: tableName, column: columnName, new_type: newType })
-    });
-
-    if (!res.ok) throw new Error((await res.json().catch(()=>({}))).detail || res.statusText);
-
-    const updated = await res.json();
-    if (t?.backendCols && updated.updated_column) {
-      const col = t.backendCols.find(c => c.column_name === columnName);
-      if (col) Object.assign(col, updated.updated_column);
-    }
-    await syncSessionDiagnostics();
-    flashSelect(selectEl, 'ok');
-    reRenderCardPills(tableName);
-
-  } catch (err) {
-    flashSelect(selectEl, 'err');
-    showStatus('convertStatus', 'error', '❌ Override: ' + err.message);
-  }
-}
-
-function flashSelect(el, state) {
-  if (!el) return;
-  el.classList.remove('saved', 'err-flash');
-  void el.offsetWidth;
-  if (state === 'ok' || state === 'local') {
-    el.classList.add('saved');
-    setTimeout(() => el.classList.remove('saved'), 1200);
-  } else {
-    el.classList.add('err-flash');
-    setTimeout(() => el.classList.remove('err-flash'), 1200);
-  }
-}
-
-function reRenderCardPills(tableName) {
-  const el = document.getElementById('pills-' + tableName);
-  if (!el) return;
-  const t = currentData[tableName];
-  if (t?.backendCols) el.innerHTML = buildPillsHTML(t.backendCols);
-}
-
 async function syncSessionDiagnostics() {
   if (!sessionId) return;
 
@@ -571,10 +510,7 @@ function renderTypePanel() {
           <div class="src-type">${col.source_sql_type || ''}</div>
         </td>
         <td>
-          <select class="type-select"
-            onchange="applyOverride('${sqlKey}','${col.column_name}',this.value,this)">
-            ${buildTypeOptions(col.final_type || col.source_sql_type || '')}
-          </select>
+          <span class="inferred-badge">${col.final_type || col.source_sql_type || '—'}</span>
         </td>
       </tr>`).join('');
   } else {
@@ -586,12 +522,7 @@ function renderTypePanel() {
       return `<tr>
         <td><span class="col-name">${h}</span></td>
         <td><span class="inferred-badge">${inf}</span></td>
-        <td>
-          <select class="type-select"
-            onchange="applyOverride('${firstKey}','${h}',this.value,this)">
-            ${buildTypeOptions(inf)}
-          </select>
-        </td>
+        <td><span class="inferred-badge">${inf}</span></td>
       </tr>`;
     }).join('');
   }
@@ -607,16 +538,6 @@ function inferLocalType(values) {
   return 'VARCHAR';
 }
 
-function buildTypeOptions(selected = '') {
-  const types = ['VARCHAR','NVARCHAR','NVARCHAR(MAX)','CHAR',
-                 'INT','BIGINT','SMALLINT','TINYINT',
-                 'DECIMAL','FLOAT','DOUBLE','NUMBER',
-                 'DATE','DATETIME','TIMESTAMP',
-                 'BOOLEAN','BIT','TEXT','NTEXT'];
-  const list = types.includes(selected) ? types : (selected ? [selected, ...types] : types);
-  return list.map(t => `<option${t === selected ? ' selected' : ''}>${t}</option>`).join('');
-}
-
 // ═══════════════════════════════════════════════════════════
 //  RENDER TABLES
 // ═══════════════════════════════════════════════════════════
@@ -625,6 +546,16 @@ const FILE_TYPE_META = {
   excel: { label:'Excel', icon:'📊', color:'var(--accent2)', dim:'rgba(0,148,255,0.12)' },
   sql  : { label:'SQL',   icon:'🗃️',  color:'var(--warn)',    dim:'rgba(245,166,35,0.12)' },
 };
+
+function buildDestBadge() {
+  const destVal = document.getElementById('destDbSelect')?.value;
+  if (!destVal) return '';
+  const shortLabel = destVal.length > 16 ? destVal.slice(0, 14) + '…' : destVal;
+  return `<span class="dest-ctx-badge" title="Destination: ${escapeHtmlAttr(destVal)}">
+    <svg width="9" height="9" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+      <path d="M12 21V11"/><path d="m8 15 4-4 4 4"/>
+    </svg>Target: ${escapeHtml(shortLabel)}</span>`;
+}
 
 function renderTables() {
   const grid = document.getElementById('tablesGrid');
@@ -704,9 +635,10 @@ function buildTableCard(k) {
       <div class="table-card-icon">${isSql ? '🗃️' : '📊'}</div>
       <div style="min-width:0;flex:1">
         <div class="table-card-name" title="${k}">
-          ${k.includes('__') ? k.split('__')[0] : k}
+          <span>${k.includes('__') ? k.split('__')[0] : k}</span>
           ${sessionTag}
           ${t.isDuplicate ? '<span class="dup-badge">⚠ DUPLICATE</span>' : ''}
+          ${buildDestBadge()}
         </div>
         <div class="table-card-meta">
           <span>${t.headers.length}</span> cols ·
@@ -997,12 +929,17 @@ function openTableModal(key) {
   overlay.id        = 'tableModalOverlay';
   overlay.addEventListener('click', e => { if (e.target === overlay) closeTableModal(); });
 
+  const destBadgeHtml = buildDestBadge();
+
   overlay.innerHTML = `
     <div class="table-modal" id="tableModal">
       <div class="table-modal-header">
         <div class="table-modal-icon">${isSql ? '🗃️' : '📊'}</div>
         <div style="min-width:0;flex:1">
-          <div class="table-modal-title">${key.includes('__') ? key.split('__')[0] : key}${currentData[key]?.isDuplicate ? ' <span class="dup-badge">⚠ DUPLICATE</span>' : ''}</div>
+          <div class="table-modal-title-row">
+            <div class="table-modal-title">${key.includes('__') ? key.split('__')[0] : key}${currentData[key]?.isDuplicate ? ' <span class="dup-badge">⚠ DUPLICATE</span>' : ''}</div>
+            ${destBadgeHtml}
+          </div>
           <div class="table-modal-meta">${cols.length} cols · ${src.length.toLocaleString()} rows · ${t.fileName}</div>
         </div>
         <div class="table-modal-search">
@@ -1055,6 +992,27 @@ function onModalSearch(val) {
   const isSql = !!t.backendCols;
   const cols  = isSql ? MAP_HEADERS : t.headers;
   const src   = isSql ? toMappingRows(t.backendCols) : t.rows;
+
+  // Fast path: if table already rendered, hide/show rows directly without full re-render
+  const body = document.getElementById('tableModalBody');
+  const existingRows = body?.querySelectorAll?.('.modal-preview-table tbody tr');
+  if (existingRows && existingRows.length > 0 && !_modalSort.col) {
+    // Build search terms for each row from current src (indexed by position)
+    let visCount = 0;
+    existingRows.forEach((tr, idx) => {
+      if (!src[idx]) return;
+      const r = src[idx];
+      const match = !_modalFilter || cols.some(h => String(r[h] ?? '').toLowerCase().includes(_modalFilter));
+      tr.style.display = match ? '' : 'none';
+      if (match) visCount++;
+    });
+    const countEl = document.getElementById('modalVisibleCount');
+    if (countEl) countEl.textContent = visCount.toLocaleString();
+    // If search active and we need highlights, do full re-render
+    if (_modalFilter) renderModalTable(cols, src, isSql);
+    return;
+  }
+
   renderModalTable(cols, src, isSql);
 }
 
@@ -1076,7 +1034,7 @@ function onModalSort(colIdx) {
 }
 
 function renderModalTable(cols, src, isSql) {
-  // 1. Filter
+  // 1. Filter — real-time, instant row hiding
   let rows = src;
   if (_modalFilter) {
     rows = src.filter(r =>
@@ -1102,6 +1060,7 @@ function renderModalTable(cols, src, isSql) {
 
   // 4. Build table HTML
   const hl = _modalFilter;
+  const tableKey = _modalKey;
 
   function hlCell(val) {
     const s = String(val ?? '');
@@ -1114,6 +1073,10 @@ function renderModalTable(cols, src, isSql) {
       escapeHtml(s.slice(idx + hl.length))
     );
   }
+
+  // IS_PK and FK_REF column indices
+  const isPkIdx  = cols.indexOf('is_pk');
+  const fkRefIdx = cols.indexOf('fk_ref');
 
   const theadHtml = cols.map((h, i) => {
     const isSorted = _modalSort.col === h;
@@ -1128,17 +1091,55 @@ function renderModalTable(cols, src, isSql) {
   let tbodyHtml;
   if (!rows.length) {
     tbodyHtml = `<tr><td colspan="${cols.length}" class="modal-no-results">
-      <span>🔍</span>ไม่พบข้อมูลที่ตรงกับ "${_modalFilter}"
+      <span>🔍</span>ไม่พบข้อมูลที่ตรงกับ "${escapeHtml(_modalFilter)}"
     </td></tr>`;
   } else {
-    tbodyHtml = rows.map((r, ri) =>
-      `<tr>
-        ${cols.map((h, ci) => {
-          const cls = (ci === 0 && isSql) ? 'modal-td-num' : '';
-          return `<td class="${cls}" title="${escapeHtmlAttr(String(r[h] ?? ''))}">${hlCell(r[h])}</td>`;
-        }).join('')}
-      </tr>`
-    ).join('');
+    tbodyHtml = rows.map((r) => {
+      const colName = r['column_name'] || '';
+      const tds = cols.map((h, ci) => {
+        const baseCls = (ci === 0 && isSql) ? 'modal-td-num' : '';
+        const rawVal  = r[h] ?? '';
+
+        // IS_PK — golden key icon when truthy
+        if (ci === isPkIdx && isSql) {
+          const isPk = rawVal === 'PK' || rawVal === true || rawVal === 'true' || rawVal === 1;
+          const content = isPk
+            ? `<span class="cell-pk-icon"><span class="pk-key">🔑</span> PK</span>`
+            : `<span style="color:var(--text3);font-size:0.85em">—</span>`;
+          return `<td class="${baseCls}" title="PK">${content}</td>`;
+        }
+
+        // FK_REF — link icon
+        if (ci === fkRefIdx && isSql) {
+          const val = String(rawVal);
+          const content = val
+            ? `<span class="cell-fk-icon">
+                <svg width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+                </svg>
+                ${hlCell(val)}
+              </span>`
+            : `<span style="color:var(--text3);font-size:0.85em">—</span>`;
+          return `<td class="${baseCls}" title="${escapeHtmlAttr(val)}">${content}</td>`;
+        }
+
+        // FINAL_TYPE — read-only display
+        if (h === 'final_type' && isSql) {
+          const curVal = String(rawVal);
+          return `<td class="${baseCls}" title="${escapeHtmlAttr(curVal)}">${hlCell(curVal)}</td>`;
+        }
+
+        // NULLABLE — read-only display
+        if (h === 'nullable' && isSql) {
+          const curVal = String(rawVal || 'NULL');
+          return `<td class="${baseCls}" title="${escapeHtmlAttr(curVal)}">${hlCell(curVal)}</td>`;
+        }
+
+        return `<td class="${baseCls}" title="${escapeHtmlAttr(String(rawVal))}">${hlCell(rawVal)}</td>`;
+      }).join('');
+      return `<tr>${tds}</tr>`;
+    }).join('');
   }
 
   const body = document.getElementById('tableModalBody');
