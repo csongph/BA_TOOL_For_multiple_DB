@@ -1,10 +1,12 @@
 import asyncio
+import json
 import logging
 import re
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from functools import lru_cache
+from pathlib import Path
 from typing import List
 import os
 
@@ -19,7 +21,7 @@ from slowapi.errors import RateLimitExceeded
 from backend.repository.mapping_repo import MappingRepository
 from backend.core.converter import DataTypeConverter
 from backend.parser.sql_parser import parse_sql, validate_fk
-from backend.config.logger import logger
+from backend.config.logger import logger, get_recent_logs, clear_logs
 from backend.config.db import init_db_pool, close_db_pool
 from backend.core.cache_store import result_cache
 from backend.exporter.excel_exporter import export_confluent_xlsx, export_table_xlsx, export_all_csv, export_table_csv
@@ -32,6 +34,8 @@ MAX_FILE_SIZE_MB = 10
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 MAX_FILES = 20
 SESSION_TTL = timedelta(hours=1)
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
+DATABASE_SUPPORT_MATRIX_PATH = CONFIG_DIR / "database_support_matrix.json"
 
 # ── Mapping cache (source_db, dest_db) → (mapping_dict, loaded_at) ──────
 _mapping_cache: dict[tuple, tuple] = {}
@@ -226,6 +230,21 @@ def _load_mapping(source_db: str | None, dest_db: str | None) -> dict:
     return fallback
 
 # ── API ───────────────────────────────────────────────────
+
+def load_database_support_matrix() -> dict:
+    """Read the database compatibility matrix from JSON on each request."""
+    try:
+        with DATABASE_SUPPORT_MATRIX_PATH.open("r", encoding="utf-8") as file:
+            return json.load(file)
+    except FileNotFoundError:
+        logger.error("Database support matrix file not found: %s", DATABASE_SUPPORT_MATRIX_PATH)
+        raise HTTPException(status_code=404, detail="Database support matrix file not found")
+    except json.JSONDecodeError as exc:
+        logger.error("Invalid database support matrix JSON: %s", exc)
+        raise HTTPException(status_code=500, detail="Database support matrix contains invalid JSON")
+    except OSError as exc:
+        logger.error("Unable to read database support matrix: %s", exc)
+        raise HTTPException(status_code=500, detail="Unable to read database support matrix")
 @app.get("/health")
 def health():
     from backend.config.db import get_connection, release_connection, get_db_names
@@ -247,6 +266,24 @@ def health():
                     pass
     overall = "ok" if all(v == "ok" for v in db_status.values()) else "degraded"
     return {"status": overall, "sessions": len(result_cache), "db": db_status}
+
+
+@app.get("/database-support")
+def get_database_support():
+    """Return database compatibility documentation from config JSON."""
+    return load_database_support_matrix()
+
+@app.get("/logs")
+def get_logs():
+    """Return recent backend processing logs for the live frontend console."""
+    return get_recent_logs()
+
+
+@app.delete("/logs")
+def delete_logs():
+    """Clear in-memory backend processing logs."""
+    clear_logs()
+    return {"status": "cleared"}
 
 @app.get("/db-pairs")
 def get_db_pairs():

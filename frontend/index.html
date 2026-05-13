@@ -173,30 +173,58 @@
     </div>
 
 
-    <!-- Type Mapping Panel -->
-    <div class="card" id="typePanelCard">
-      <div class="card-header">
-        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" style="color:var(--text3)">
-          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-        </svg>
-        <span class="card-title">Type Mapping</span>
+    <!-- Processing Logs Console -->
+    <div class="card logs-card" id="logsPanelCard">
+      <div class="logs-card-header">
+        <div class="logs-title-wrap">
+          <span class="logs-icon" aria-hidden="true">
+            <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <polyline points="4 17 10 11 4 5"/>
+              <line x1="12" y1="19" x2="20" y2="19"/>
+            </svg>
+          </span>
+          <div>
+            <span class="card-title logs-title">Processing Logs Console</span>
+            <div class="logs-subtitle">FastAPI live stream</div>
+          </div>
+        </div>
+        <div class="logs-header-actions">
+          <span class="logs-status-badge connected" id="logsStatusBadge">CONNECTED</span>
+          <button class="logs-collapse-btn" id="logsCollapseBtn" type="button" onclick="toggleLogsPanel()" title="Collapse logs">
+            <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+              <polyline points="18 15 12 9 6 15"/>
+            </svg>
+          </button>
+        </div>
       </div>
-      <div class="card-body" style="padding:0;overflow-y:auto;max-height:320px;">
-        <table class="type-table">
-          <thead>
-            <tr>
-              <th>Column</th>
-              <th>Inferred</th>
-              <th>Override</th>
-            </tr>
-          </thead>
-          <tbody id="typeTableBody">
-            <tr><td colspan="3"><div class="empty-hint">No file loaded</div></td></tr>
-          </tbody>
-        </table>
+
+      <div class="logs-panel-body" id="logsPanelBody">
+        <div class="logs-toolbar">
+          <input class="logs-search" id="logsSearchInput" type="search" placeholder="Search logs" autocomplete="off">
+          <select class="logs-level-filter" id="logsLevelFilter" aria-label="Filter logs by level">
+            <option value="ALL">All Levels</option>
+            <option value="INFO">INFO</option>
+            <option value="SUCCESS">SUCCESS</option>
+            <option value="WARNING">WARNING</option>
+            <option value="ERROR">ERROR</option>
+          </select>
+          <button class="logs-tool-btn danger" type="button" onclick="clearProcessingLogs()">Clear</button>
+          <button class="logs-tool-btn" type="button" onclick="downloadProcessingLogs()">Download .txt</button>
+        </div>
+
+        <div class="logs-counters" aria-label="Log counters">
+          <span><b id="logCountAll">0</b> total</span>
+          <span class="info"><b id="logCountInfo">0</b> info</span>
+          <span class="success"><b id="logCountSuccess">0</b> success</span>
+          <span class="warning"><b id="logCountWarning">0</b> warning</span>
+          <span class="error"><b id="logCountError">0</b> error</span>
+        </div>
+
+        <div class="logs-console" id="logsConsole" role="log" aria-live="polite" aria-label="Processing logs">
+          <div class="logs-empty" id="logsEmptyState">Waiting for backend logs...</div>
+        </div>
       </div>
     </div>
-
   </aside>
 
   <!-- MAIN CONTENT -->
@@ -211,10 +239,6 @@
       <div class="stat-card">
         <div class="stat-label">Tables Found</div>
         <div class="stat-value" id="statTables">0</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">Total Rows</div>
-        <div class="stat-value" id="statRows">0</div>
       </div>
     </div>
 
@@ -253,6 +277,48 @@
 
   </div>
 </div>
+
+<!-- REFERENCES FAB -->
+<button class="ref-fab" id="refFab" onclick="toggleReferences()" title="REFERENCES & VERSION SUPPORT">
+  <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+  </svg>
+  <span>REFERENCES & VERSION SUPPORT</span>
+  <span class="ref-fab-badge" id="refFabBadge">0</span>
+  <svg class="ref-chevron" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+    <polyline points="18 15 12 9 6 15"/>
+  </svg>
+</button>
+
+<!-- REFERENCES DRAWER -->
+<div class="ref-panel" id="refPanel">
+  <div class="ref-header">
+    <svg class="ref-header-icon" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+    </svg>
+    <span class="ref-header-title" id="refHeaderTitle">Database Compatibility Documentation</span>
+    <span class="ref-header-sub" id="refHeaderSub">Loading...</span>
+    <div class="ref-tabs">
+      <button class="ref-tab active" id="tabRefs" onclick="switchRefTab('refs')">References</button>
+      <button class="ref-tab" id="tabVersion" onclick="switchRefTab('version')">Version Support</button>
+    </div>
+    <button class="ref-close-btn" onclick="toggleReferences()">&times;</button>
+  </div>
+
+  <div class="ref-tab-pane active" id="paneRefs">
+    <div class="ref-dynamic-state" id="refDynamicState">
+      <div class="ref-loading-spinner"></div>
+      <div>Loading database support documentation...</div>
+    </div>
+    <div class="ref-body dynamic" id="refBody"></div>
+  </div>
+
+  <div class="ref-tab-pane" id="paneVersion">
+    <div class="ver-body dynamic" id="versionSupportBody"></div>
+  </div>
+</div><!-- /ref-panel -->
 
 <script src="script.js"></script>
 </body>

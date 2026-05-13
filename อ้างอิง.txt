@@ -14,22 +14,19 @@ Available at: https://docs.oracle.com/en/database/oracle/oracle-database/23/sqlr
 
 2. Standard SQL Data Types (ANSI / ISO References)
 
-[5] International Organization for Standardization. ISO/IEC 9075 — SQL Standard.
-Available at: https://www.iso.org/standard/76583.html
-
-[6] American National Standards Institute. ANSI SQL Standard.
+[5] American National Standards Institute. ANSI SQL Standard.
 Available at: https://www.ansi.org
 
-[7] Microsoft. Equivalent ANSI SQL Data Types.
+[6] Microsoft. Equivalent ANSI SQL Data Types.
 Available at: https://support.microsoft.com/en-au/office/equivalent-ansi-sql-data-types-7a0a6bef-ef25-45f9-8a9a-3c5f21b5c65d
 
-[8] Oracle Corporation. ANSI SQL Data Types (TimesTen).
+[7] Oracle Corporation. ANSI SQL Data Types (TimesTen).
 Available at: https://docs.oracle.com/en/database/other-databases/timesten/22.1/sql-reference/ansi-sql-data-types.html
 
-[9] Oracle Corporation. Oracle Database 21c SQL Quick Reference — Data Types.
+[8] Oracle Corporation. Oracle Database 21c SQL Quick Reference — Data Types.
 Available at: https://docs.oracle.com/en/database/oracle/oracle-database/21/sqlqr/Data-Types.html
 
 3. Logical Types (Semantic Layer)
 
-[10] Apache Software Foundation. Apache Avro Specification — Logical Types.
-Available at: https://avro.apache.org/docs/current/spec.html#Logical+Types
+[9] Apache Software Foundation. Apache Avro Specification — Logical Types.
+Available at: https://avro.apache.org/docs/1.10.0/spec.html?utm_source=chatgpt.com#Logical+Types

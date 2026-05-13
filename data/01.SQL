@@ -20,5 +20,6 @@ CREATE TABLE hrEmployee_Profile (
 	CreatedDate datetime NULL,
 	ModifiedBy varchar(36) COLLATE Thai_CI_AS NULL,
 	ModifiedDate datetime NULL,
-	Remark nvarchar(500) COLLATE Thai_CI_AS NULL
+	Remark nvarchar(500) COLLATE Thai_CI_AS NULL,
+	FOREIGN KEY (EmployeeID) REFERENCES hrEmployee(EmployeeID)
 );

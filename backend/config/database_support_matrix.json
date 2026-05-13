@@ -1,0 +1,126 @@
+{
+  "project": {
+    "name": "BA TOOL - Data Modernization Project",
+    "document": "Database Compatibility Matrix & References"
+  },
+  "database_support_matrix": [
+    {
+      "database": "PostgreSQL",
+      "supported_versions": {
+        "minimum": "10.0",
+        "recommended": "18.3+"
+      },
+      "technical_notes": [
+        "Supports JSONB",
+        "Supports UUID",
+        "Supports Geometry"
+      ]
+    },
+    {
+      "database": "SQL Server",
+      "supported_versions": {
+        "minimum": "2012",
+        "recommended": "2022+"
+      },
+      "technical_notes": [
+        "Supports DateTime2",
+        "Supports DateTimeOffset",
+        "Optimized for high precision datetime handling"
+      ]
+    },
+    {
+      "database": "MySQL",
+      "supported_versions": {
+        "minimum": "5.7",
+        "recommended": "8.0+"
+      },
+      "technical_notes": [
+        "Supports JSON datatype",
+        "Supports TinyInt(1) for boolean/logical values"
+      ]
+    },
+    {
+      "database": "Oracle",
+      "supported_versions": {
+        "minimum": "11g",
+        "recommended": "23c"
+      },
+      "technical_notes": [
+        "Supports SDO_GEOMETRY",
+        "Supports VARCHAR2",
+        "Designed for Oracle modern stack compatibility"
+      ]
+    }
+  ],
+  "references": {
+    "official_vendor_documentation": [
+      {
+        "id": 1,
+        "vendor": "Microsoft",
+        "title": "Data types (Transact-SQL)",
+        "url": "https://learn.microsoft.com/en-us/sql/t-sql/data-types/data-types-transact-sql",
+        "category": "sqlserver"
+      },
+      {
+        "id": 2,
+        "vendor": "PostgreSQL Global Development Group",
+        "title": "PostgreSQL Data Types",
+        "url": "https://www.postgresql.org/docs/current/datatype.html",
+        "category": "postgresql"
+      },
+      {
+        "id": 3,
+        "vendor": "Oracle Corporation",
+        "title": "MySQL 8.0 Reference Manual — Data Types",
+        "url": "https://dev.mysql.com/doc/refman/8.0/en/data-types.html",
+        "category": "mysql"
+      },
+      {
+        "id": 4,
+        "vendor": "Oracle Corporation",
+        "title": "Oracle Database 23c SQL Language Reference — Data Types",
+        "url": "https://docs.oracle.com/en/database/oracle/oracle-database/23/sqlrf/Data-Types.html",
+        "category": "oracle"
+      }
+    ],
+    "standard_sql_data_types": [
+      {
+        "id": 5,
+        "organization": "American National Standards Institute",
+        "title": "ANSI SQL Standard",
+        "url": "https://www.ansi.org",
+        "category": "ansi_sql"
+      },
+      {
+        "id": 6,
+        "vendor": "Microsoft",
+        "title": "Equivalent ANSI SQL Data Types",
+        "url": "https://support.microsoft.com/en-au/office/equivalent-ansi-sql-data-types-7a0a6bef-ef25-45f9-8a9a-3c5f21b5c65d",
+        "category": "ansi_sql"
+      },
+      {
+        "id": 7,
+        "vendor": "Oracle Corporation",
+        "title": "ANSI SQL Data Types (TimesTen)",
+        "url": "https://docs.oracle.com/en/database/other-databases/timesten/22.1/sql-reference/ansi-sql-data-types.html",
+        "category": "ansi_sql"
+      },
+      {
+        "id": 8,
+        "vendor": "Oracle Corporation",
+        "title": "Oracle Database 21c SQL Quick Reference — Data Types",
+        "url": "https://docs.oracle.com/en/database/oracle/oracle-database/21/sqlqr/Data-Types.html",
+        "category": "oracle"
+      }
+    ],
+    "logical_types": [
+      {
+        "id": 9,
+        "organization": "Apache Software Foundation",
+        "title": "Apache Avro Specification — Logical Types",
+        "url": "https://avro.apache.org/docs/1.10.0/spec.html#Logical+Types",
+        "category": "avro_logical_types"
+      }
+    ]
+  }
+}

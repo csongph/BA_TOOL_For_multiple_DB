@@ -652,13 +652,12 @@ function renderTables() {
   grid.innerHTML = ['csv','excel','sql'].filter(ft => groups[ft]).map(ft => {
     const meta      = FILE_TYPE_META[ft];
     const tkeys     = groups[ft];
-    const totalRows = tkeys.reduce((s, k) => s + currentData[k].rows.length, 0);
     return `
       <div class="type-group">
         <div class="type-group-header" style="--g-color:${meta.color};--g-dim:${meta.dim}">
           <span class="type-group-icon">${meta.icon}</span>
           <span class="type-group-label">${meta.label}</span>
-          <span class="type-group-count">${tkeys.length} table${tkeys.length>1?'s':''} · ${totalRows.toLocaleString()} rows</span>
+          <span class="type-group-count">${tkeys.length} table${tkeys.length>1?'s':''}</span>
           <div class="type-group-line"></div>
         </div>
         <div class="tables-subgrid">
@@ -1328,7 +1327,8 @@ function clearUI() {
 function updateStats(files, tables, rows) {
   document.getElementById('statFiles').textContent  = files;
   document.getElementById('statTables').textContent = tables;
-  document.getElementById('statRows').textContent   = rows.toLocaleString();
+  const statRows = document.getElementById('statRows');
+  if (statRows) statRows.textContent = rows.toLocaleString();
 }
 
 function updateBadges(tables, rows, status) {
@@ -1432,10 +1432,223 @@ async function loadDbPairs() {
 }
 
 // ── Init ──────────────────────────────────────────────────
+
+// ============================================================================
+//  PROCESSING LOGS CONSOLE
+// ============================================================================
+const LOG_REFRESH_MS = 1500;
+const LOG_DOM_LIMIT = 2000;
+let _logPollTimer = null;
+let _logEntries = [];
+let _logKeys = new Set();
+
+function initProcessingLogs() {
+  bindLogControls();
+  fetchProcessingLogs();
+  if (_logPollTimer) clearInterval(_logPollTimer);
+  _logPollTimer = setInterval(fetchProcessingLogs, LOG_REFRESH_MS);
+}
+
+function bindLogControls() {
+  document.getElementById('logsSearchInput')?.addEventListener('input', applyLogFilters);
+  document.getElementById('logsLevelFilter')?.addEventListener('change', applyLogFilters);
+}
+
+function normalizeLogLevel(log) {
+  const rawLevel = String(log.level || 'INFO').toUpperCase();
+  const message = String(log.message || '');
+  if (rawLevel === 'WARN') return 'WARNING';
+  if (rawLevel === 'SUCCESS') return 'SUCCESS';
+  if (/success|succeeded|complete|completed|initialized|created/i.test(message)) return 'SUCCESS';
+  if (rawLevel === 'ERROR' || rawLevel === 'CRITICAL' || rawLevel === 'FATAL') return 'ERROR';
+  if (rawLevel === 'WARNING') return 'WARNING';
+  return 'INFO';
+}
+
+function normalizeLog(log) {
+  const timestamp = String(log.timestamp || '').trim() || new Date().toISOString().slice(0, 19).replace('T', ' ');
+  const message = String(log.message || '').trim();
+  const level = normalizeLogLevel(log);
+  return { timestamp, level, message };
+}
+
+function getLogKey(log) {
+  return `${log.timestamp}|${log.level}|${log.message}`;
+}
+
+async function fetchProcessingLogs() {
+  const consoleEl = document.getElementById('logsConsole');
+  if (!consoleEl) return;
+
+  try {
+    const res = await fetchWithApiFallback('/logs');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const payload = await res.json();
+    if (!Array.isArray(payload)) throw new Error('Invalid logs payload');
+
+    const freshLogs = [];
+    payload.map(normalizeLog).forEach(log => {
+      const key = getLogKey(log);
+      if (_logKeys.has(key)) return;
+      _logKeys.add(key);
+      _logEntries.push(log);
+      freshLogs.push(log);
+    });
+
+    if (freshLogs.length) {
+      appendLogLines(freshLogs);
+      updateLogCounters();
+      setLogStatus(inferLogStatus(freshLogs[freshLogs.length - 1], true));
+    } else {
+      setLogStatus(_logEntries.length ? inferLogStatus(_logEntries[_logEntries.length - 1], false) : 'CONNECTED');
+    }
+
+    toggleLogEmptyState();
+  } catch (err) {
+    setLogStatus('ERROR');
+    if (!_logEntries.length) {
+      const empty = document.getElementById('logsEmptyState');
+      if (empty) empty.textContent = `Unable to connect to /logs: ${err.message}`;
+    }
+  }
+}
+
+function appendLogLines(logs) {
+  const consoleEl = document.getElementById('logsConsole');
+  if (!consoleEl) return;
+
+  const fragment = document.createDocumentFragment();
+  logs.forEach(log => fragment.appendChild(createLogLine(log)));
+  consoleEl.appendChild(fragment);
+
+  trimLogDom(consoleEl);
+  applyLogFilters(false);
+  consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+
+function createLogLine(log) {
+  const line = document.createElement('div');
+  line.className = `log-line ${log.level.toLowerCase()}`;
+  line.dataset.level = log.level;
+  line.dataset.search = `${log.timestamp} ${log.level} ${log.message}`.toLowerCase();
+
+  const time = document.createElement('span');
+  time.className = 'log-time';
+  time.textContent = `[${log.timestamp}]`;
+
+  const level = document.createElement('span');
+  level.className = 'log-level';
+  level.textContent = log.level.padEnd(7, ' ');
+
+  const message = document.createElement('span');
+  message.className = 'log-message';
+  message.textContent = log.message;
+
+  line.append(time, level, message);
+  return line;
+}
+
+function trimLogDom(consoleEl) {
+  const lines = consoleEl.querySelectorAll('.log-line');
+  const overflow = lines.length - LOG_DOM_LIMIT;
+  if (overflow <= 0) return;
+  for (let i = 0; i < overflow; i++) lines[i].remove();
+}
+
+function applyLogFilters(shouldScroll = true) {
+  const query = (document.getElementById('logsSearchInput')?.value || '').trim().toLowerCase();
+  const level = document.getElementById('logsLevelFilter')?.value || 'ALL';
+  const consoleEl = document.getElementById('logsConsole');
+  if (!consoleEl) return;
+
+  consoleEl.querySelectorAll('.log-line').forEach(line => {
+    const levelMatches = level === 'ALL' || line.dataset.level === level;
+    const textMatches = !query || line.dataset.search.includes(query);
+    line.classList.toggle('hidden', !(levelMatches && textMatches));
+  });
+
+  if (shouldScroll) consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+
+function updateLogCounters() {
+  const counts = { INFO: 0, SUCCESS: 0, WARNING: 0, ERROR: 0 };
+  _logEntries.forEach(log => { counts[log.level] = (counts[log.level] || 0) + 1; });
+
+  const setText = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value.toLocaleString();
+  };
+  setText('logCountAll', _logEntries.length);
+  setText('logCountInfo', counts.INFO || 0);
+  setText('logCountSuccess', counts.SUCCESS || 0);
+  setText('logCountWarning', counts.WARNING || 0);
+  setText('logCountError', counts.ERROR || 0);
+}
+
+function inferLogStatus(latestLog, hasNewLogs) {
+  if (!latestLog) return 'CONNECTED';
+  if (latestLog.level === 'ERROR') return 'ERROR';
+  if (latestLog.level === 'SUCCESS' || /complete|completed|created|initialized|success/i.test(latestLog.message)) return 'COMPLETED';
+  return hasNewLogs ? 'PROCESSING' : 'CONNECTED';
+}
+
+function setLogStatus(status) {
+  const badge = document.getElementById('logsStatusBadge');
+  if (!badge) return;
+  const normalized = ['CONNECTED', 'PROCESSING', 'ERROR', 'COMPLETED'].includes(status) ? status : 'CONNECTED';
+  badge.textContent = normalized;
+  badge.className = `logs-status-badge ${normalized.toLowerCase()}`;
+}
+
+function toggleLogEmptyState() {
+  const empty = document.getElementById('logsEmptyState');
+  if (!empty) return;
+  empty.style.display = _logEntries.length ? 'none' : 'flex';
+}
+
+async function clearProcessingLogs() {
+  try {
+    await fetchWithApiFallback('/logs', { method: 'DELETE' });
+  } catch (err) {
+    setLogStatus('ERROR');
+    return;
+  }
+  _logEntries = [];
+  _logKeys = new Set();
+  const consoleEl = document.getElementById('logsConsole');
+  if (consoleEl) consoleEl.querySelectorAll('.log-line').forEach(line => line.remove());
+  updateLogCounters();
+  setLogStatus('CONNECTED');
+  const empty = document.getElementById('logsEmptyState');
+  if (empty) empty.textContent = 'Waiting for backend logs...';
+  toggleLogEmptyState();
+  await fetchProcessingLogs();
+}
+
+function downloadProcessingLogs() {
+  const body = _logEntries.length
+    ? _logEntries.map(formatLogLine).join('\n')
+    : 'No logs captured.';
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  triggerDownload(new Blob([body], { type: 'text/plain;charset=utf-8' }), `processing_logs_${stamp}.txt`);
+}
+
+function formatLogLine(log) {
+  return `[${log.timestamp}] ${log.level.padEnd(7, ' ')} ${log.message}`;
+}
+
+function toggleLogsPanel() {
+  document.getElementById('logsPanelCard')?.classList.toggle('collapsed');
+}
+
+// WebSocket-ready: replace polling with an onmessage handler that calls
+// appendLogLines([normalizeLog(JSON.parse(event.data))]).
 window.addEventListener('DOMContentLoaded', () => {
   setTheme(localStorage.getItem('theme') || 'dark');
   checkHealth();
   loadDbPairs();
+  initProcessingLogs();
   setInterval(checkHealth, 30_000);
 });
 
@@ -1684,3 +1897,274 @@ function renderFKErrors(fkErrors) {
 window.addEventListener('beforeunload', () => {
   if (sessionId) fetch(`${API_BASE}/session/${sessionId}`, { method: 'DELETE', keepalive: true });
 });
+// ═══════════════════════════════════════════════════════════
+//  REFERENCES PANEL
+// ═══════════════════════════════════════════════════════════
+// ============================================================================
+//  DATABASE SUPPORT DOCUMENTATION (dynamic from backend)
+// ============================================================================
+let _databaseSupportLoading = false;
+
+async function loadDatabaseSupportDocumentation() {
+  if (_databaseSupportLoading) return;
+  _databaseSupportLoading = true;
+  renderDatabaseSupportLoading();
+
+  try {
+    const res = await fetchWithApiFallback('/database-support', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    validateDatabaseSupportPayload(data);
+    renderDatabaseSupportDocumentation(data);
+  } catch (err) {
+    renderDatabaseSupportError(err);
+  } finally {
+    _databaseSupportLoading = false;
+  }
+}
+
+function validateDatabaseSupportPayload(data) {
+  if (!data || typeof data !== 'object') throw new Error('Invalid database support payload');
+  if (!Array.isArray(data.database_support_matrix)) throw new Error('Missing database_support_matrix');
+  if (!data.references || typeof data.references !== 'object') throw new Error('Missing references');
+}
+
+function renderDatabaseSupportLoading() {
+  const state = document.getElementById('refDynamicState');
+  const refs = document.getElementById('refBody');
+  const versions = document.getElementById('versionSupportBody');
+  if (state) {
+    state.className = 'ref-dynamic-state loading';
+    state.innerHTML = `
+      <div class="ref-loading-spinner"></div>
+      <div>
+        <div class="ref-state-title">Loading database support documentation...</div>
+        <div class="ref-state-sub">Fetching latest compatibility matrix from FastAPI</div>
+      </div>`;
+    state.style.display = 'flex';
+  }
+  if (refs) refs.innerHTML = renderReferenceSkeletons();
+  if (versions) versions.innerHTML = renderVersionSkeletons();
+}
+
+function renderDatabaseSupportError(err) {
+  const state = document.getElementById('refDynamicState');
+  const refs = document.getElementById('refBody');
+  const versions = document.getElementById('versionSupportBody');
+  if (state) {
+    state.className = 'ref-dynamic-state error';
+    state.innerHTML = `
+      <div>
+        <div class="ref-state-title">Unable to load database support data</div>
+        <div class="ref-state-sub">${escapeHtml(err.message || 'Unknown error')}</div>
+      </div>
+      <button class="ref-retry-btn" type="button" onclick="loadDatabaseSupportDocumentation()">Retry</button>`;
+    state.style.display = 'flex';
+  }
+  if (refs) refs.innerHTML = '';
+  if (versions) versions.innerHTML = '';
+  updateReferenceHeader(null);
+}
+
+function renderDatabaseSupportDocumentation(data) {
+  const state = document.getElementById('refDynamicState');
+  const refs = document.getElementById('refBody');
+  const versions = document.getElementById('versionSupportBody');
+  if (state) state.style.display = 'none';
+  updateReferenceHeader(data);
+  if (refs) refs.innerHTML = renderReferenceSections(data.references);
+  if (versions) versions.innerHTML = renderVersionSupport(data);
+}
+
+function updateReferenceHeader(data) {
+  const project = data?.project || {};
+  const count = data ? countReferences(data.references) : 0;
+  const title = document.getElementById('refHeaderTitle');
+  const sub = document.getElementById('refHeaderSub');
+  const badge = document.getElementById('refFabBadge');
+  if (title) title.textContent = project.document || 'Database Compatibility Documentation';
+  if (sub) sub.textContent = data ? `${count} refs ? ${project.generated_date || 'live config'}` : 'Unavailable';
+  if (badge) badge.textContent = count;
+}
+
+function countReferences(references) {
+  return Object.values(references || {}).reduce((sum, items) => sum + (Array.isArray(items) ? items.length : 0), 0);
+}
+
+function renderReferenceSections(references) {
+  const groups = Object.entries(references || {}).filter(([, items]) => Array.isArray(items) && items.length);
+  if (!groups.length) return '<div class="ref-empty-block">No reference links available.</div>';
+
+  let start = 1;
+  return groups.map(([key, items], index) => {
+    const html = renderReferenceSection(key, items, index + 1, start);
+    start += items.length;
+    return html;
+  }).join('');
+}
+
+function renderReferenceSection(key, items, sectionNum, start) {
+  return `
+    <div class="ref-section dynamic-section">
+      <div class="ref-section-label">
+        <span class="ref-section-num">${sectionNum}</span>
+        <span class="ref-section-title">${formatReferenceGroupTitle(key)}</span>
+      </div>
+      <ol class="ref-list" start="${start}">
+        ${items.map(renderReferenceItem).join('')}
+      </ol>
+    </div>`;
+}
+
+function renderReferenceItem(item) {
+  const owner = item.vendor || item.organization || 'Documentation';
+  const category = item.category || 'reference';
+  const host = getUrlHost(item.url);
+  return `
+    <li class="ref-item">
+      <div class="ref-item-num"></div>
+      <div class="ref-item-body">
+        <div class="ref-item-top">
+          <span class="ref-tag ${getRefTagClass(category)}">${escapeHtml(formatCategoryLabel(category))}</span>
+          <span class="ref-author">${escapeHtml(owner)}.</span>
+        </div>
+        <div class="ref-title">${escapeHtml(item.title || 'Untitled reference')}</div>
+        <div class="ref-item-bottom">
+          <a class="ref-link" href="${escapeHtmlAttr(item.url || '#')}" target="_blank" rel="noopener">
+            <svg width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15,3 21,3 21,9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            ${escapeHtml(host)}
+          </a>
+        </div>
+      </div>
+    </li>`;
+}
+
+function renderVersionSupport(data) {
+  const matrix = Array.isArray(data.database_support_matrix) ? data.database_support_matrix : [];
+  if (!matrix.length) return '<div class="ref-empty-block">No database support matrix available.</div>';
+
+  return `
+    <div class="ver-intro dynamic-intro">
+      ${escapeHtml(data.project?.name || 'BA Tool')} ? Compatibility data loaded from backend configuration.
+    </div>
+    <div class="support-table-wrap">
+      <table class="support-table">
+        <thead>
+          <tr>
+            <th>Database</th>
+            <th>Minimum</th>
+            <th>Recommended</th>
+            <th>Technical Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${matrix.map(renderSupportTableRow).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="ver-grid dynamic-grid">
+      ${matrix.map(renderVersionCard).join('')}
+    </div>`;
+}
+
+function renderSupportTableRow(item) {
+  const versions = item.supported_versions || {};
+  const notes = Array.isArray(item.technical_notes) ? item.technical_notes : [];
+  return `
+    <tr>
+      <td><span class="ref-tag ${getRefTagClass(item.database)}">${escapeHtml(item.database || 'Unknown')}</span></td>
+      <td>${escapeHtml(versions.minimum || '-')}</td>
+      <td>${escapeHtml(versions.recommended || '-')}</td>
+      <td>${notes.map(note => `<span class="support-note-chip">${escapeHtml(note)}</span>`).join('')}</td>
+    </tr>`;
+}
+
+function renderVersionCard(item) {
+  const versions = item.supported_versions || {};
+  const notes = Array.isArray(item.technical_notes) ? item.technical_notes : [];
+  return `
+    <div class="ver-card dynamic-card">
+      <div class="ver-card-head">
+        <span class="ref-tag ${getRefTagClass(item.database)}">${escapeHtml(item.database || 'Database')}</span>
+        <span class="ver-range">${escapeHtml(versions.minimum || '-')} - ${escapeHtml(versions.recommended || '-')}</span>
+      </div>
+      <div class="ver-features">
+        ${notes.map(note => `<span class="ver-feature">${escapeHtml(note)}</span>`).join('')}
+      </div>
+    </div>`;
+}
+
+function renderReferenceSkeletons() {
+  return Array.from({ length: 3 }).map((_, sectionIndex) => `
+    <div class="ref-section dynamic-section skeleton-section">
+      <div class="ref-skeleton title"></div>
+      ${Array.from({ length: sectionIndex === 2 ? 1 : 3 }).map(() => `
+        <div class="ref-skeleton-card">
+          <div class="ref-skeleton small"></div>
+          <div class="ref-skeleton line"></div>
+          <div class="ref-skeleton short"></div>
+        </div>`).join('')}
+    </div>`).join('');
+}
+
+function renderVersionSkeletons() {
+  return `
+    <div class="ref-skeleton line wide"></div>
+    <div class="ver-grid dynamic-grid">
+      ${Array.from({ length: 4 }).map(() => `
+        <div class="ver-card dynamic-card">
+          <div class="ref-skeleton title"></div>
+          <div class="ref-skeleton line"></div>
+          <div class="ref-skeleton short"></div>
+        </div>`).join('')}
+    </div>`;
+}
+
+function formatReferenceGroupTitle(key) {
+  return String(key || '')
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function formatCategoryLabel(category) {
+  return String(category || 'reference')
+    .replace(/_/g, ' ')
+    .replace(/sqlserver/i, 'SQL Server')
+    .replace(/postgresql/i, 'PostgreSQL')
+    .replace(/mysql/i, 'MySQL')
+    .replace(/oracle/i, 'Oracle')
+    .replace(/ansi sql/i, 'ANSI')
+    .replace(/avro logical types/i, 'Avro');
+}
+
+function getRefTagClass(value) {
+  const key = String(value || '').toLowerCase();
+  if (key.includes('postgres')) return 'ref-tag-pg';
+  if (key.includes('mysql')) return 'ref-tag-mysql';
+  if (key.includes('sqlserver') || key.includes('sql server') || key.includes('mssql')) return 'ref-tag-mssql';
+  if (key.includes('oracle')) return 'ref-tag-oracle';
+  if (key.includes('ansi')) return 'ref-tag-ansi';
+  if (key.includes('avro')) return 'ref-tag-avro';
+  return 'ref-tag-ansi';
+}
+
+function getUrlHost(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ''); }
+  catch { return 'external link'; }
+}
+function toggleReferences() {
+  const panel = document.getElementById('refPanel');
+  const fab   = document.getElementById('refFab');
+  const isOpen = panel.classList.toggle('open');
+  if (fab) fab.classList.toggle('open', isOpen);
+  if (isOpen) loadDatabaseSupportDocumentation();
+}
+
+function switchRefTab(tab) {
+  const tabs  = { refs: 'tabRefs',    version: 'tabVersion'  };
+  const panes = { refs: 'paneRefs',   version: 'paneVersion' };
+  Object.keys(tabs).forEach(t => {
+    document.getElementById(tabs[t]) ?.classList.toggle('active', t === tab);
+    document.getElementById(panes[t])?.classList.toggle('active', t === tab);
+  });
+}
