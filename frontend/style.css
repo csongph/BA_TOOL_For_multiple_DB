@@ -2837,9 +2837,6 @@ body {
   background: #edf0fa !important;
   color: rgba(74,88,128,0.5) !important;
 }
-/* ═══════════════════════════════════════════════════════════
-   REFERENCES PANEL  —  v2 redesign
-   ═══════════════════════════════════════════════════════════ */
 
 /* ── floating trigger pill ── */
 .ref-fab {
@@ -3958,3 +3955,4 @@ body { padding-bottom: 72px; }
   .ref-body.dynamic { grid-template-columns: 1fr; }
   .support-table { min-width: 640px; }
 }
+

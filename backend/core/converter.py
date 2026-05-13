@@ -1,13 +1,4 @@
 import re
-
-# [FIX] ลบ _DECIMAL_FAMILY ออก — ไม่ใช้แล้ว เพราะเช็ค logical_type แทน
-# เดิมเช็ค source SQL type (base) ∈ DECIMAL_FAMILY ซึ่ง false positive ทุก binary type
-# เช่น binary, varbinary, bytea, blob, image ล้วน raw='bytes' แต่ logical='bytes' (ถูกต้อง)
-# byte anomaly จริงๆ คือ: raw='bytes' แต่ logical ไม่ใช่ 'decimal'
-# เพราะ Avro spec กำหนดให้ decimal type store เป็น bytes → logical='decimal' raw='bytes' = ปกติ
-# แต่ถ้า logical='bytes' (ไม่ใช่ decimal) แล้ว raw='bytes' ก็ยังปกติ (binary type)
-# → anomaly จริงๆ มีแค่กรณีที่ raw='bytes' แต่ logical เป็นอะไรแปลกๆ ที่ไม่ควรเป็น bytes
-
 # raw_type ที่ถือว่าเป็น "byte output" ใน Avro
 _BYTE_RAW_TYPES = {"bytes", "byte", "byte[]", "binary"}
 
@@ -82,7 +73,6 @@ class DataTypeConverter:
         mapping = override_mapping if override_mapping is not None else self.mapping
         base = self.normalize(sql_type)
 
-        # [FIX] ลอง exact key ก่อน แล้วค่อย fallback ไป base
         exact_key = sql_type.lower().strip().rstrip(",")
         data = mapping.get(exact_key) or mapping.get(base)
 
@@ -106,10 +96,6 @@ class DataTypeConverter:
         standard_type = data.get("final")
 
         # ── ตรวจ byte anomaly ────────────────────────────────────
-        # [FIX] เช็ค logical_type แทน source base type
-        # raw='bytes' + logical='decimal' → Avro decimal (ถูกต้อง ไม่ใช่ anomaly)
-        # raw='bytes' + logical='bytes'   → binary type ปกติ (ถูกต้อง ไม่ใช่ anomaly)
-        # raw='bytes' + logical=อื่นๆ     → น่าสงสัย ให้ flag
         raw_type_lower = (data["raw"] or "").lower().strip()
         logical_lower = (data["logical"] or "").lower().strip()
         is_byte_output = raw_type_lower in _BYTE_RAW_TYPES
