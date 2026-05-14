@@ -5,13 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SQL File Converter</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
-<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<!-- [FIX] เปลี่ยนจาก cdn.sheetjs.com (unstable) → cdnjs (stable, no rate limit) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 
-<!-- ⚙️ Set API base URL — change for production -->
+<!-- ⚙️ API_BASE: ถูก inject โดย GitHub Actions (sed) ก่อน deploy
+     %%API_BASE%% จะถูกแทนที่ด้วยค่าจริงใน deploy.yml
+     ถ้ายังเป็น placeholder → fallback localhost สำหรับ local dev -->
 <script>
-  window.API_BASE = 'http://localhost:8000';
+  (function () {
+    var injected = '%%API_BASE%%';
+    window.API_BASE = injected.indexOf('%%') === -1
+      ? injected.replace(/\/$/, '')
+      : (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+          ? 'http://localhost:8000'
+          : '');
+  })();
 </script>
 </head>
 <body>

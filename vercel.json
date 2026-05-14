@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "name": "sql-file-converter",
+  "builds": [
+    {
+      "src": "frontend/**",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/frontend/$1"
+    }
+  ],
+  "env": {
+    "API_BASE": "http://localhost:8000"
+  }
+}

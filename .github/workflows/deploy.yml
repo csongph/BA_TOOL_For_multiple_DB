@@ -1,0 +1,71 @@
+name: Deploy Frontend to Vercel
+
+on:
+  push:
+    branches:
+      - main          # auto-deploy เมื่อ merge เข้า main
+  pull_request:
+    branches:
+      - main          # สร้าง preview URL ทุก PR
+
+jobs:
+  deploy:
+    name: Deploy to Vercel
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ───────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Install Vercel CLI ─────────────────────────────
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      # ── 3. Pull Vercel environment (แยก production / preview) ──
+      - name: Pull Vercel environment
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+          else
+            vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}
+          fi
+
+      # ── 4. Inject API_BASE into index.html ────────────────
+      #   ต้องตั้งค่า vars.API_BASE ใน GitHub → Settings → Variables → Actions
+      #   เช่น  API_BASE = https://your-api.example.com
+      - name: Inject API_BASE into index.html
+        run: |
+          sed -i "s|%%API_BASE%%|${{ vars.API_BASE }}|g" frontend/index.html
+          echo "✅ Injected API_BASE = ${{ vars.API_BASE }}"
+
+      # ── 5a. Deploy Preview (PR) ───────────────────────────
+      - name: Deploy Preview
+        if: github.event_name == 'pull_request'
+        id: preview
+        run: |
+          PREVIEW_URL=$(vercel deploy --token=${{ secrets.VERCEL_TOKEN }} 2>&1 | tail -1)
+          echo "preview_url=$PREVIEW_URL" >> $GITHUB_OUTPUT
+          echo "✅ Preview: $PREVIEW_URL"
+
+      # ── 5b. Deploy Production (push to main) ─────────────
+      - name: Deploy Production
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }}
+          echo "✅ Production deployed"
+
+      # ── 6. Comment preview URL on PR ─────────────────────
+      - name: Comment preview URL on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚀 **Preview deployment ready!**\n\n🔗 ${process.env.PREVIEW_URL}`
+            })
+        env:
+          PREVIEW_URL: ${{ steps.preview.outputs.preview_url }}

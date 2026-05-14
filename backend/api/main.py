@@ -111,11 +111,17 @@ _ORIGINS = os.getenv(
     "http://localhost:5500,http://127.0.0.1:5500,http://localhost:8000,http://127.0.0.1:8000,null"
 ).split(",")
 
+# VERCEL_ORIGIN: ตั้งค่าใน Railway environment variable
+# เช่น VERCEL_ORIGIN=https://sql-file-converter.vercel.app
+_VERCEL_ORIGIN = os.getenv("VERCEL_ORIGIN", "").strip().rstrip("/")
+if _VERCEL_ORIGIN:
+    _ORIGINS.append(_VERCEL_ORIGIN)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_ORIGINS,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_credentials=True,          
+    allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type"],
 )
