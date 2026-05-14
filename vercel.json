@@ -1,19 +1,11 @@
 {
   "version": 2,
-  "name": "sql-file-converter",
-  "builds": [
-    {
-      "src": "frontend/**",
-      "use": "@vercel/static"
-    }
-  ],
+  "name": "ba-tool-for-multiple-db",
+  "outputDirectory": "frontend",
   "routes": [
     {
       "src": "/(.*)",
-      "dest": "/frontend/$1"
+      "dest": "/$1"
     }
-  ],
-  "env": {
-    "API_BASE": "http://localhost:8000"
-  }
+  ]
 }
