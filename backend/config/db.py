@@ -57,7 +57,15 @@ def _init_single(db_name: str, db_url: str) -> None:
         logger.info(f"ℹ️  Pool '{db_name}' already initialized — skipping")
         return
     try:
-        _pools[db_name] = pool.ThreadedConnectionPool(_POOL_MIN, _POOL_MAX, db_url)
+        # ถ้า URL มี sslmode อยู่แล้ว ไม่ต้องเพิ่ม
+        # ถ้าไม่มี ให้เพิ่ม sslmode=require อัตโนมัติ
+        connect_kwargs = {}
+        if "sslmode" not in db_url:
+            connect_kwargs["sslmode"] = "require"
+
+        _pools[db_name] = pool.ThreadedConnectionPool(
+            _POOL_MIN, _POOL_MAX, db_url, **connect_kwargs
+        )
         logger.info(f"✅ DB pool '{db_name}' initialized (min={_POOL_MIN}, max={_POOL_MAX})")
     except OperationalError as e:
         logger.error(f"❌ Failed to create pool '{db_name}': {e}")
