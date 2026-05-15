@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: ba-tool-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.api.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DB_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: VERCEL_ORIGIN
+        sync: false
+      - key: DB_POOL_MIN
+        value: 2
+      - key: DB_POOL_MAX
+        value: 10
