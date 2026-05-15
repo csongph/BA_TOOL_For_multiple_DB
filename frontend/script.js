@@ -7,18 +7,18 @@
 // ─────────────────────────────────────────────────────────────
 
 function resolveApiBase() {
-  // [FIX] รับค่าจาก window.API_BASE ที่ inject ใน index.html ก่อน
+  // รับค่าจาก window.API_BASE ที่ inject ใน index.html ก่อน
   const configured = (window.API_BASE || '').trim();
   if (configured) return configured.replace(/\/$/, '');
 
-  const { protocol, hostname, port } = window.location;
-  const isHttp = protocol === 'http:' || protocol === 'https:';
+  const { hostname } = window.location;
   const host = hostname || 'localhost';
 
-  if (!isHttp || host === 'localhost') return 'http://localhost:8000';
-  if (host === '127.0.0.1') return 'http://127.0.0.1:8000';
-  if (port === '8000') return `${protocol}//${host}:8000`;
-  return `${protocol}//${host}:8000`;
+  // local dev
+  if (host === 'localhost' || host === '127.0.0.1') return 'http://localhost:8000';
+
+  // production → ใช้ Render backend
+  return 'https://ba-tool-backend.onrender.com';
 }
 
 let API_BASE = resolveApiBase();
