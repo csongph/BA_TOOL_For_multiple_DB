@@ -555,3 +555,33 @@ def export_one_csv(session_id: str, table_name: str):
         media_type="text/csv; charset=utf-8-sig",
         headers={"Content-Disposition": f'attachment; filename="{_make_export_filename([table_name], "csv")}"'},
     )
+
+# ── Maintenance Status ────────────────────────────────────
+@app.get("/system/maintenance")
+def get_maintenance():
+    """BA_TOOL frontend เรียกเพื่อเช็ค maintenance state"""
+    try:
+        from backend.config.db import get_connection, release_connection
+        conn = get_connection("default")
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT key, value FROM system_settings WHERE key IN ('maintenance_mode', 'maintenance_reason')"
+                )
+                rows = cur.fetchall()
+                data = {row[0]: row[1] for row in rows}
+                enabled = data.get("maintenance_mode", "false").strip().lower() == "true"
+                reason  = data.get("maintenance_reason", "")
+        finally:
+            release_connection(conn, "default")
+    except Exception:
+        enabled = False
+        reason  = ""
+
+    return {
+        "success": True,
+        "data": {
+            "maintenance": enabled,
+            "reason": reason,
+        }
+    }
