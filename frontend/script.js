@@ -1570,66 +1570,95 @@ function toggleLogsPanel() {
 // ════════════════════════════════════════════════════════════════════════════
 
 let _inMaintenance   = false;
+const MAINT_POLL_ACTIVE_MS  = 10_000;  // poll ทุก 10 วิ ขณะ maintenance
+const MAINT_POLL_NORMAL_MS  = 30_000;  // poll ทุก 30 วิ ปกติ
 let _maintPollTimer  = null;
-const MAINT_POLL_MS  = 30_000;   // ตรวจทุก 30 วิ
 
-/** แสดง/ซ่อน overlay และ disable ทุก interaction */
+/** block/unblock ทุก interactive element */
+function _setAppLocked(locked) {
+  // ปุ่มหลัก
+  ['convertBtn', 'fileInput'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = locked;
+  });
+  // dropzone
+  const dz = document.getElementById('dropzone');
+  if (dz) {
+    dz.style.pointerEvents = locked ? 'none' : '';
+    dz.style.opacity       = locked ? '0.3' : '';
+  }
+  // select dropdowns
+  ['sourceDbSelect', 'destDbSelect'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.disabled = locked;
+  });
+  // download buttons
+  document.querySelectorAll('.download-btn, .export-btn, [onclick*="download"], [onclick*="export"]').forEach(el => {
+    el.disabled = locked;
+    el.style.pointerEvents = locked ? 'none' : '';
+    el.style.opacity       = locked ? '0.3' : '';
+  });
+}
+
+/** แสดง/ซ่อน overlay และ block ทุก interaction */
 function _applyMaintenanceUI(active, reason = '') {
   const overlay = document.getElementById('maintenanceOverlay');
   if (!overlay) return;
 
-  if (active === _inMaintenance && overlay.style.display === (active ? 'flex' : 'none')) return; // ไม่มีการเปลี่ยนแปลง
+  if (active === _inMaintenance && overlay.style.display === (active ? 'flex' : 'none')) return;
 
   _inMaintenance = active;
   overlay.style.display = active ? 'flex' : 'none';
+  _setAppLocked(active);
 
   // reason text
   const reasonEl = document.getElementById('maintenanceReason');
   if (reasonEl) reasonEl.textContent = reason ? `💬 ${reason}` : '';
 
-  // อัปเดต status dot ใน topbar
+  // status dot ใน topbar
   const dot = document.getElementById('backendDot');
   const lbl = document.getElementById('backendLabel');
   if (active) {
     if (dot) dot.className = 'status-dot maintenance';
     if (lbl) lbl.textContent = '🔧 Maintenance';
   } else {
-    // คืนค่าให้ checkHealth จัดการ
     checkHealth();
   }
+
+  // ปรับ poll interval — ถ้า maintenance ให้ poll ถี่ขึ้นเพื่อ auto-refresh เมื่อกลับมา
+  clearInterval(_maintPollTimer);
+  _maintPollTimer = setInterval(checkMaintenance, active ? MAINT_POLL_ACTIVE_MS : MAINT_POLL_NORMAL_MS);
 }
 
 /** poll maintenance API แล้ว apply UI */
 async function checkMaintenance() {
   try {
     const res = await fetch(`${API_BASE}/system/maintenance`);
-    if (!res.ok) return; // ถ้า API ล่ม ไม่ block user
+    if (!res.ok) return;
     const payload = await res.json();
     const active  = payload?.data?.maintenance ?? false;
+    const reason  = payload?.data?.reason ?? '';
 
-    let reason = '';
-    if (active) {
-      try {
-        const rRes = await fetch(`${API_BASE}/system/maintenance/reason`);
-        const rPay = await rRes.json();
-        reason = rPay?.data?.reason ?? '';
-      } catch { /* ignore */ }
+    // ถ้าเพิ่งกลับมาจาก maintenance → reload หน้าเพื่อ reset state ทั้งหมด
+    if (_inMaintenance && !active) {
+      window.location.reload();
+      return;
     }
 
     _applyMaintenanceUI(active, reason);
   } catch {
-    // ถ้า network fail ให้ผ่านไปก่อน (fail-open) ไม่ block user
+    // network fail → fail-open ไม่ block user
   }
 }
 
 window.addEventListener('DOMContentLoaded', () => {
   setTheme(localStorage.getItem('theme') || 'dark');
-  checkMaintenance();                          // ตรวจ maintenance ก่อนเลย
+  checkMaintenance();
   checkHealth();
   loadDbPairs();
   initProcessingLogs();
-  setInterval(checkHealth,       30_000);
-  setInterval(checkMaintenance,  30_000);      // poll ทุก 30 วิ
+  setInterval(checkHealth, MAINT_POLL_NORMAL_MS);
+  _maintPollTimer = setInterval(checkMaintenance, MAINT_POLL_NORMAL_MS);
 });
 
 // ── Download XLSX ─────────────────────────────────────────
