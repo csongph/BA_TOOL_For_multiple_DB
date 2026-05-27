@@ -7,7 +7,9 @@
 (function () {
   'use strict';
 
-  const ADMIN_BACKEND = 'localhost:8000';  // ← เปลี่ยนเป็น Render URL ตอน deploy
+  const ADMIN_BACKEND = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+    ? 'localhost:8000'
+    : 'admin-console-for-batool.onrender.com';
   const WS_URL = (location.protocol === 'https:' ? 'wss' : 'ws') +
     '://' + ADMIN_BACKEND + '/ws/presence';
 
