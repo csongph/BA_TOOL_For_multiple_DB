@@ -26,15 +26,12 @@ def _fetch_maintenance_state() -> tuple[bool, str]:
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT value FROM system_config WHERE key = 'maintenance_mode' LIMIT 1"
+                    "SELECT key, value FROM system_settings WHERE key IN ('maintenance_mode', 'maintenance_reason')"
                 )
-                row = cur.fetchone()
-                if row is None:
-                    return False, ""
-                import json
-                data = json.loads(row[0]) if isinstance(row[0], str) else row[0]
-                enabled = bool(data.get("enabled", False))
-                reason  = data.get("reason", "")
+                rows = cur.fetchall()
+                data = {row[0]: row[1] for row in rows}
+                enabled = data.get("maintenance_mode", "false").strip().lower() == "true"
+                reason  = data.get("maintenance_reason", "")
                 return enabled, reason
         finally:
             release_connection(conn, "default")
