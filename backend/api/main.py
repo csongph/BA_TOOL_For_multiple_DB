@@ -17,6 +17,7 @@ from pydantic import BaseModel, field_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from backend.middleware.maintenance_middleware import MaintenanceMiddleware
 
 from backend.repository.mapping_repo import MappingRepository
 from backend.core.converter import DataTypeConverter
@@ -125,6 +126,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type"],
 )
+
+app.add_middleware(MaintenanceMiddleware)
 
 # ── Models ────────────────────────────────────────────────
 class OverrideRequest(BaseModel):
