@@ -8,7 +8,7 @@
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | Vanilla JS / HTML / CSS — deploy บน **Vercel** |
+| Frontend | JS / HTML / CSS — deploy บน **Vercel** |
 | Backend | Python 3.13 · **FastAPI** · Uvicorn — deploy บน **Render** |
 | Database | **PostgreSQL** |
 | CI/CD | GitHub Actions |
