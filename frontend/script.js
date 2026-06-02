@@ -1323,7 +1323,7 @@ function setBackendStatus(ok) {
   const lbl = document.getElementById('backendLabel');
   if (!dot||!lbl) return;
   dot.className   = 'status-dot '+(ok?'online':'offline');
-  lbl.textContent = ok ? 'API Online' : 'API Offline';
+  lbl.textContent = ok ? 'CONNECTED' : 'API Offline';
 }
 
 /* ────────────────────────────────────────────────────────────
@@ -1377,7 +1377,11 @@ function showUsernameModal() {
   const feedback = document.getElementById('usernameFeedback');
   const current = localStorage.getItem('username') || '';
   if (input) { input.value = current; input.focus(); }
-  if (save) save.disabled = true;
+  if (!input || !save || !avatar || !feedback) {
+    console.warn('Username modal missing required elements');
+    return;
+  }
+  save.disabled = true;
 
   function onInput() {
     const v = input.value || '';
@@ -1385,8 +1389,13 @@ function showUsernameModal() {
     avatar.textContent = initialsFromName(v);
     avatar.style.background = g;
     const ok = validateUsername(v);
-    if (!ok.ok) { feedback.textContent = ok.msg; save.disabled = true; }
-    else { feedback.textContent = ''; save.disabled = false; }
+    if (!ok.ok) {
+      feedback.textContent = ok.msg;
+      save.disabled = true;
+    } else {
+      feedback.textContent = '';
+      save.disabled = false;
+    }
   }
 
   function onKey(e) {
@@ -1399,7 +1408,8 @@ function showUsernameModal() {
 
   input.addEventListener('input', onInput);
   input.addEventListener('keydown', onKey);
-  save.addEventListener('click', () => saveUsername(input.value));
+  save.addEventListener('click', (event) => { event.preventDefault(); saveUsername(input.value); });
+  onInput();
 }
 
 function saveUsername(username) {
