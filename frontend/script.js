@@ -1371,7 +1371,7 @@ function showUsernameModal() {
   if (!modal) return;
   modal.style.display = 'flex';
   modal.setAttribute('aria-hidden','false');
-  const input = document.getElementById('usernameInput');
+  const input = document.getElementById('usernameModalInput');
   const save = document.getElementById('saveUsernameBtn');
   const avatar = document.getElementById('modalAvatar');
   const feedback = document.getElementById('usernameFeedback');
@@ -1398,13 +1398,14 @@ function showUsernameModal() {
 
   input.addEventListener('input', onInput);
   input.addEventListener('keydown', onKey);
-  save.addEventListener('click', saveUsername);
+  save.addEventListener('click', () => saveUsername(input.value));
 }
 
 function saveUsername(username) {
   // Accept optional `username` (from inline editor or programmatic calls)
+  const modalInput = document.getElementById('usernameModalInput');
   const input = document.getElementById('usernameInput');
-  let v = (typeof username === 'string') ? username : (input ? input.value : '');
+  let v = (typeof username === 'string') ? username : (modalInput && modalInput.value ? modalInput.value : input ? input.value : '');
   const ok = validateUsername(v || '');
   if (!ok.ok) return;
 
