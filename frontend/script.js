@@ -1407,6 +1407,8 @@ function showUsernameModal() {
   }
 
   input.addEventListener('input', onInput);
+  input.addEventListener('compositionend', onInput);
+  input.addEventListener('keyup', onInput);
   input.addEventListener('keydown', onKey);
   save.addEventListener('click', (event) => { event.preventDefault(); saveUsername(input.value); });
   onInput();
