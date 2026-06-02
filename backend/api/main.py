@@ -339,6 +339,7 @@ async def convert(
 
     for file in files:
         filename = file.filename
+        logger.info(f"📄 Processing file: {filename}")
         try:
             raw = await file.read()
             if len(raw) > MAX_FILE_SIZE:
