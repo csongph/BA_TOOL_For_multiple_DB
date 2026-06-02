@@ -979,24 +979,6 @@ function onModalSearch(val) {
   const isSql = !!t.backendCols;
   const cols  = isSql ? MAP_HEADERS : t.headers;
   const src   = isSql ? toMappingRows(t.backendCols) : t.rows;
-
-  const body = document.getElementById('tableModalBody');
-  const existingRows = body?.querySelectorAll?.('.modal-preview-table tbody tr');
-  if (existingRows && existingRows.length > 0 && !_modalSort.col) {
-    let visCount = 0;
-    existingRows.forEach((tr, idx) => {
-      if (!src[idx]) return;
-      const r = src[idx];
-      const match = !_modalFilter || cols.some(h => String(r[h] ?? '').toLowerCase().includes(_modalFilter));
-      tr.style.display = match ? '' : 'none';
-      if (match) visCount++;
-    });
-    const countEl = document.getElementById('modalVisibleCount');
-    if (countEl) countEl.textContent = visCount.toLocaleString();
-    if (_modalFilter) renderModalTable(cols, src, isSql);
-    return;
-  }
-
   renderModalTable(cols, src, isSql);
 }
 
@@ -1389,6 +1371,7 @@ function initUsernameModal() {
     avatar.style.background = g;
     const ok = validateUsername(value);
     feedback.textContent = ok.ok ? '' : ok.msg;
+    save.disabled = !ok.ok;
   };
 
   input.addEventListener('input', updateSaveState);
@@ -1436,13 +1419,14 @@ function showUsernameModal() {
 
 function updateSaveStateOnShow() {
   if (!usernameModalState) return;
-  const { input, avatar, feedback } = usernameModalState;
+  const { input, avatar, feedback, save } = usernameModalState;
   const value = input.value || '';
   const g = gradientFromName(value);
   avatar.textContent = initialsFromName(value);
   avatar.style.background = g;
   const ok = validateUsername(value);
   feedback.textContent = ok.ok ? '' : ok.msg;
+  save.disabled = !ok.ok;
 }
 
 function saveUsername(username) {
@@ -1504,18 +1488,22 @@ function enableProfileEdit() {
     btn.style.display = 'none';
     chip.appendChild(save); chip.appendChild(cancel);
 
-    function cleanup() {
-      const span = document.createElement('div'); span.id = 'profileName'; span.className='username'; span.textContent = input.value || 'Guest';
-      input.replaceWith(span); save.remove(); cancel.remove(); btn.style.display='inline-block'; renderProfile(span.textContent);
+    function cleanup(savedValue) {
+      const display = savedValue || input.value || 'Guest';
+      const span = document.createElement('div'); span.id = 'profileName'; span.className='username'; span.textContent = display;
+      input.replaceWith(span); save.remove(); cancel.remove(); btn.style.display='inline-block';
+      renderProfile(display);
     }
 
     save.addEventListener('click', () => {
       const ok = validateUsername(input.value);
       if (!ok.ok) { input.focus(); return; }
       localStorage.setItem('username', ok.value);
-      cleanup();
+      localStorage.setItem('ba_session', JSON.stringify({ user_id: ok.value, id: ok.value }));
+      window.dispatchEvent(new Event('ba_username_changed'));
+      cleanup(ok.value);
     });
-    cancel.addEventListener('click', () => { cleanup(); });
+    cancel.addEventListener('click', () => { cleanup(current); });
     input.addEventListener('keydown', (e) => { if (e.key==='Enter') save.click(); if (e.key==='Escape') cancel.click(); });
     input.focus();
   });
@@ -1538,19 +1526,8 @@ function showSessionExpiredOverlay() {
 }
 
 // Initialize on load
-window.addEventListener('DOMContentLoaded', () => {
-  const saved = getSavedUsername();
-  if (!saved) {
-    // lock interactions by showing modal for new users
-    showUsernameModal();
-  } else {
-    // existing user on this browser: skip onboarding
-    handleLocalUsernameChange(saved);
-  }
-  enableProfileEdit();
-  // wire profile chip click to open onboarding modal for quick rename
-  document.getElementById('profileChip')?.addEventListener('click', (e) => { if ((e.target||{}).id !== 'profileEditBtn') showUsernameModal(); });
-});
+
+
 
 
 function setTheme(theme) {
@@ -1902,6 +1879,17 @@ async function checkMaintenance() {
 window.addEventListener('DOMContentLoaded', () => {
   setTheme(localStorage.getItem('theme') || 'dark');
   initUsername();
+
+  // username onboarding / profile chip
+  const saved = getSavedUsername();
+  if (!saved) {
+    showUsernameModal();
+  } else {
+    handleLocalUsernameChange(saved);
+  }
+  enableProfileEdit();
+  document.getElementById('profileChip')?.addEventListener('click', (e) => { if ((e.target||{}).id !== 'profileEditBtn') showUsernameModal(); });
+
   checkMaintenance();
   checkHealth();
   loadDbPairs();
@@ -2169,11 +2157,13 @@ function renderFKErrors(fkErrors) {
   if (!fkErrors || !fkErrors.length) return;
 
   const items = fkErrors.map(e => {
-    const isErr = (e.level || 'error') === 'error';
-    const icon  = isErr ? '❌' : '⚠️';
-    return `<li class="fk-err-item ${e.level}">
+    // backend returns: { table, column, ref_table, ref_col, error }
+    const src  = e.src  || `${e.table}.${e.column}`;
+    const msg  = e.msg  || e.error || 'FK validation error';
+    const icon = '❌';
+    return `<li class="fk-err-item error">
       <span class="fk-err-icon">${icon}</span>
-      <span><b>${e.src}</b> — ${e.msg}</span>
+      <span><b>${escapeHtml(src)}</b> — ${escapeHtml(msg)}</span>
     </li>`;
   });
 

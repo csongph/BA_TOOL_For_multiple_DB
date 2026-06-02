@@ -232,8 +232,11 @@ def _strip_collate(tokens: list[str]) -> str:
 
 
 def _strip_sql_comments(sql_text: str) -> str:
+    # ลบ block comments /* ... */ ก่อน (รองรับหลายบรรทัด)
+    result = re.sub(r"/\*.*?\*/", " ", sql_text, flags=re.DOTALL)
+
     lines: list[str] = []
-    for line in sql_text.splitlines():
+    for line in result.splitlines():
         in_single = False
         in_double = False
         cut_idx = len(line)

@@ -40,7 +40,7 @@ DATABASE_SUPPORT_MATRIX_PATH = CONFIG_DIR / "database_support_matrix.json"
 
 # ── Mapping cache (source_db, dest_db) → (mapping_dict, loaded_at) ──────
 _mapping_cache: dict[tuple, tuple] = {}
-_MAPPING_TTL = timedelta(minutes=5)
+_MAPPING_TTL = timedelta(seconds=30)
 
 converter: DataTypeConverter = DataTypeConverter({})
 
