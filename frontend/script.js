@@ -2228,17 +2228,12 @@ function switchRefTab(tab) {
 
 // ── Username Tracking Helpers ──────────────────────────────
 function initUsername() {
-  const usernameInput = document.getElementById('usernameInput');
-  if (!usernameInput) return;
-  
-  try {
-    const session = JSON.parse(
-      localStorage.getItem('ba_session') || sessionStorage.getItem('ba_session') || 'null'
-    );
-    usernameInput.value = session?.user_id || '';
-  } catch (e) {
-    usernameInput.value = '';
+  const name = getSavedUsername();
+  const input = document.getElementById('usernameInput');
+  if (input) {
+    input.value = name;
   }
+  renderUsernameState();
 }
 
 function saveUsername(username) {
@@ -2252,6 +2247,7 @@ function saveUsername(username) {
     }
     // Dispatch custom event to let presence-user.js reconnect and update the Admin Console instantly
     window.dispatchEvent(new Event('ba_username_changed'));
+    renderUsernameState();
   } catch (e) {
     console.error('Failed to save username:', e);
   }
@@ -2266,4 +2262,81 @@ function getSavedUsername() {
   } catch {
     return '';
   }
+}
+
+function renderUsernameState() {
+  const name = getSavedUsername();
+  const badge = document.getElementById('userActiveBadge');
+  const inputWrapper = document.getElementById('userInputWrapper');
+  const displayName = document.getElementById('userDisplayName');
+  const avatarCircle = document.getElementById('userAvatarCircle');
+
+  if (name) {
+    if (displayName) displayName.textContent = name;
+    if (avatarCircle) {
+      // Get initials
+      const parts = name.split(/[\s_-]+/);
+      let initials = '';
+      if (parts.length > 1) {
+        initials = (parts[0][0] + parts[1][0]).toUpperCase();
+      } else {
+        initials = name.slice(0, 2).toUpperCase();
+      }
+      avatarCircle.textContent = initials;
+      // Apply beautiful custom hash-based color gradient
+      avatarCircle.style.background = getAvatarGradient(name);
+    }
+    
+    // Show badge state, hide input state
+    badge?.classList.remove('hidden');
+    inputWrapper?.classList.add('hidden');
+  } else {
+    // Hide badge state, show input state to ask for username
+    badge?.classList.add('hidden');
+    inputWrapper?.classList.remove('hidden');
+  }
+}
+
+function enableNameEditing() {
+  const badge = document.getElementById('userActiveBadge');
+  const inputWrapper = document.getElementById('userInputWrapper');
+  const input = document.getElementById('usernameInput');
+
+  badge?.classList.add('hidden');
+  inputWrapper?.classList.remove('hidden');
+  input?.focus();
+  input?.select();
+}
+
+function disableNameEditing() {
+  // If a username exists, switch back to the active badge state on blur
+  const name = getSavedUsername();
+  const input = document.getElementById('usernameInput');
+  
+  // Clean empty input
+  if (input && !input.value.trim()) {
+    saveUsername('');
+  }
+  
+  if (name) {
+    renderUsernameState();
+  }
+}
+
+function getAvatarGradient(name) {
+  const gradients = [
+    'linear-gradient(135deg, #00c985 0%, #168cff 100%)',   // Green -> Blue
+    'linear-gradient(135deg, #ff007f 0%, #7f00ff 100%)',   // Pink -> Purple
+    'linear-gradient(135deg, #ff9900 0%, #ff5500 100%)',   // Orange -> Red
+    'linear-gradient(135deg, #00f2fe 0%, #4facfe 100%)',   // Cyan -> Dark Blue
+    'linear-gradient(135deg, #b224ef 0%, #7579ff 100%)',   // Magenta -> Indigo
+    'linear-gradient(135deg, #f857a6 0%, #ff5858 100%)'    // Coral -> Salmon
+  ];
+  if (!name) return gradients[0];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const index = Math.abs(hash) % gradients.length;
+  return gradients[index];
 }

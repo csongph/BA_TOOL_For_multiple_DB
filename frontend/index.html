@@ -44,9 +44,20 @@
   </div>
 
   <!-- User Profile Section -->
-  <div class="user-profile">
-    <span class="user-avatar" id="userAvatar">👤</span>
-    <input type="text" id="usernameInput" class="username-input" placeholder="ใส่ชื่อของคุณ..." title="ชื่อผู้ใช้งานสำหรับเก็บใน Log" onchange="saveUsername(this.value)">
+  <div class="user-profile" id="userProfileContainer">
+    <!-- Active status display state -->
+    <div class="user-badge hidden" id="userActiveBadge" onclick="enableNameEditing()">
+      <div class="avatar-circle" id="userAvatarCircle">U</div>
+      <span class="user-display-name" id="userDisplayName">User</span>
+      <span class="status-indicator-dot pulsing"></span>
+      <span class="edit-icon">✏️</span>
+    </div>
+    
+    <!-- Editing input state -->
+    <div class="user-input-wrapper" id="userInputWrapper">
+      <span class="user-avatar-icon">👤</span>
+      <input type="text" id="usernameInput" class="username-input" placeholder="ใส่ชื่อของคุณ..." title="ชื่อผู้ใช้งานสำหรับเก็บใน Log" onblur="disableNameEditing()" onchange="saveUsername(this.value)">
+    </div>
   </div>
 
   <!-- Admin Console Button -->
