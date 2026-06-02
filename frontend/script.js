@@ -1381,7 +1381,6 @@ function initUsernameModal() {
   }
 
   usernameModalState = { modal, input, save, avatar, feedback };
-  save.disabled = false;
 
   const updateSaveState = () => {
     const value = input.value || '';
@@ -1390,7 +1389,6 @@ function initUsernameModal() {
     avatar.style.background = g;
     const ok = validateUsername(value);
     feedback.textContent = ok.ok ? '' : ok.msg;
-    save.disabled = !ok.ok;
   };
 
   input.addEventListener('input', updateSaveState);
@@ -1438,14 +1436,13 @@ function showUsernameModal() {
 
 function updateSaveStateOnShow() {
   if (!usernameModalState) return;
-  const { input, avatar, feedback, save } = usernameModalState;
+  const { input, avatar, feedback } = usernameModalState;
   const value = input.value || '';
   const g = gradientFromName(value);
   avatar.textContent = initialsFromName(value);
   avatar.style.background = g;
   const ok = validateUsername(value);
   feedback.textContent = ok.ok ? '' : ok.msg;
-  save.disabled = !ok.ok;
 }
 
 function saveUsername(username) {
